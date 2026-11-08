@@ -197,7 +197,9 @@ void main() {
 	}
 };
 
-IndoorGpuRenderer::IndoorGpuRenderer() = default;
+IndoorGpuRenderer::IndoorGpuRenderer(float displayPixelAspect) : _displayPixelAspect(displayPixelAspect) {
+	if (displayPixelAspect <= 0) throw std::invalid_argument("Invalid indoor display pixel aspect");
+}
 IndoorGpuRenderer::~IndoorGpuRenderer() = default;
 
 std::vector<std::uint32_t> IndoorGpuRenderer::render(const IndexedFrame &frame) {
@@ -227,8 +229,9 @@ std::vector<std::uint32_t> IndoorGpuRenderer::render(const IndexedFrame &frame) 
 	gl.Enable(GL_DEPTH_TEST); gl.DepthFunc(GL_LEQUAL); gl.Disable(GL_CULL_FACE); gl.Disable(GL_BLEND);
 	gl.UseProgram(r.program); gl.BindVertexArray(r.vao); gl.BindBuffer(GL_ARRAY_BUFFER, r.vbo);
 	gl.ActiveTexture(GL_TEXTURE0); gl.Uniform1i(gl.GetUniformLocation(r.program, "image"), 0);
-	// 90-degree vertical FOV; account for the original monitor's tall pixels.
-	constexpr float nearPlane = 0.04f, farPlane = 12.f, aspect = 216.f / (132.f * 1.2f);
+	// Match the displayed viewport, not its pre-aspect-correction framebuffer.
+	constexpr float nearPlane = 0.04f, farPlane = 12.f;
+	const float aspect = float(viewWidth) / (viewHeight * _displayPixelAspect);
 	const GLfloat projection[]{1 / aspect, 0, 0, 0, 0, 1, 0, 0,
 		0, 0, -(farPlane + nearPlane) / (farPlane - nearPlane), -1,
 		0, 0, -2 * farPlane * nearPlane / (farPlane - nearPlane), 0};

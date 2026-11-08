@@ -21,6 +21,11 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 	const auto texture = [&](const std::string &name, std::size_t frame, XeenSceneArchive archive) {
 		return assets.spriteTexture(name, frame, archive == XeenSceneArchive::Current ? ambient : archive);
 	};
+	const auto referenceWall = texture("f" + prefix + "2.fwl", 1, resources.walls);
+	if (!referenceWall->width || !referenceWall->height)
+		throw std::runtime_error("Indoor wall material has no dimensions");
+	const float wallHeight = float(referenceWall->height) / referenceWall->width;
+	const float eyeHeight = wallHeight / 2;
 	const auto vertex = [&](float x, float y, float height, float u, float v) {
 		x -= int(camera.x); y -= int(camera.y);
 		float right = 0, forward = 0;
@@ -31,7 +36,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		case XeenDirection::West: right = y; forward = -x; break;
 		default: throw std::runtime_error("Invalid indoor GPU camera direction");
 		}
-		return IndoorVertex{right, height - 0.5f, -forward, u, v};
+		return IndoorVertex{right, height - eyeHeight, -forward, u, v};
 	};
 	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices) {
 		if (image->width && image->height) scene->quads.push_back({std::move(image), vertices});
@@ -42,7 +47,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		const auto *geometry = std::get_if<XeenIndoorGeometryDraw>(&command.content);
 		if (!geometry || command.originalOrder != 1) continue;
 		const auto sky = texture(geometry->resourceName, geometry->frame, geometry->options.archive);
-		add(sky, {{{-12, -0.5f, -10, 0, 1}, {12, -0.5f, -10, 1, 1},
+		add(sky, {{{-12, -eyeHeight, -10, 0, 1}, {12, -eyeHeight, -10, 1, 1},
 			{12, 10, -10, 1, 0}, {-12, 10, -10, 0, 0}}});
 		break;
 	}
@@ -65,8 +70,8 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			vertex(r, n, 0, 1, 0), vertex(l, n, 0, 0, 0)});
 		if (cell->cell->flags & 8) {
 			add(texture(prefix + ".sky", 0, resources.sky),
-				{vertex(l, n, 1, 0, 0), vertex(r, n, 1, 1, 0),
-				 vertex(r, s, 1, 1, 1), vertex(l, s, 1, 0, 1)});
+				{vertex(l, n, wallHeight, 0, 0), vertex(r, n, wallHeight, 1, 0),
+				 vertex(r, s, wallHeight, 1, 1), vertex(l, s, wallHeight, 0, 1)});
 		}
 		for (unsigned face = 0; face < 4; ++face) {
 			const auto direction = static_cast<XeenDirection>(face);
@@ -82,15 +87,19 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			}
 			if (!visibleSide) continue;
 			const bool open = dx == 0 && dy == 0 && direction == camera.direction && drawing.openDoor;
-			add(wallTexture(value, open), {vertex(ax, ay, 0, 0, 1), vertex(bx, by, 0, 1, 1),
-				vertex(bx, by, 1, 1, 0), vertex(ax, ay, 1, 0, 0)});
+			auto image = wallTexture(value, open);
+			if (!image->width || !image->height) continue;
+			// A unit-wide quad needs H/W world height for isotropic source texels.
+			const float height = float(image->height) / image->width;
+			add(image, {vertex(ax, ay, 0, 0, 1), vertex(bx, by, 0, 1, 1),
+				vertex(bx, by, height, 1, 0), vertex(ax, ay, height, 0, 0)});
 		}
 	}
 	// Use the original visible records and animation frames; GPU visibility never drives combat.
 	for (const auto &command : commands) {
 		std::shared_ptr<const IndoorTexture> image;
 		bool flip = false;
-		float lane = 0, height = 0.8f;
+		float lane = 0, height = wallHeight * 0.8f;
 		if (const auto *object = command.object()) {
 			image = texture(object->visual.spriteName, object->visual.frame,
 				xeenMapResources(object->visual.identity.mapId).objectArt);
@@ -103,15 +112,16 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			lane = float(actor->selectedSlot % 3 - 1) * 0.23f;
 		} else if (const auto *item = command.wallItem()) {
 			image = texture(item->resourceName, item->frame, item->archive);
-			height = 0.35f;
+			height = wallHeight * 0.35f;
 		} else continue;
 		if (!image->width || !image->height) continue;
 		auto center = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
 		center.x += lane;
 		if (center.z > -0.3f) center.z = -0.4f;
 		if (command.wallItem()) center.z -= 0.46f;
-		const float width = std::min(0.95f, height * image->width / image->height);
-		const float bottom = command.wallItem() ? -0.05f : -0.5f;
+		float width = height * image->width / image->height;
+		if (width > 0.95f) { height *= 0.95f / width; width = 0.95f; }
+		const float bottom = command.wallItem() ? -wallHeight * 0.05f : -eyeHeight;
 		const float u0 = flip ? 1.f : 0.f, u1 = 1.f - u0;
 		add(image, {{{center.x - width / 2, bottom, center.z, u0, 1},
 			{center.x + width / 2, bottom, center.z, u1, 1},

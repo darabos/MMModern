@@ -314,7 +314,6 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 			SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
 		}
 	} resources;
-	IndoorGpuRenderer gpu;
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 	auto &placement = placementMemory();
 	if (placement.file && !placement.loaded) placement.placement = placement.saved = readWindowPlacement(*placement.file);
@@ -338,6 +337,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		~PlacementRecord() { try { recordWindowedSize(window); savePlacement(); } catch (...) {} }
 	} placementRecord{window};
 	const bool corrected = placement.placement.aspect == PictureAspect::FourThree;
+	IndoorGpuRenderer gpu(corrected ? 1.2f : 1.f);
 	SDL_SetWindowMinimumSize(window, initialFrame.width, corrected ? initialFrame.width * 3 / 4 : initialFrame.height);
 
 	SDL_Renderer *renderer = resources.renderer = SDL_CreateRenderer(window, -1,

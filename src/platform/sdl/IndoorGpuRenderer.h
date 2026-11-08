@@ -7,7 +7,7 @@
 namespace mmodern {
 class IndoorGpuRenderer {
 public:
-	IndoorGpuRenderer();
+	explicit IndoorGpuRenderer(float displayPixelAspect = 1.2f);
 	~IndoorGpuRenderer();
 	IndoorGpuRenderer(const IndoorGpuRenderer &) = delete;
 	IndoorGpuRenderer &operator=(const IndoorGpuRenderer &) = delete;
@@ -16,6 +16,7 @@ public:
 private:
 	struct Impl;
 	std::unique_ptr<Impl> _impl;
+	float _displayPixelAspect;
 };
 }
 #endif
