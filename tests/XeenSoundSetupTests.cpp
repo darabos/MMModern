@@ -37,7 +37,7 @@ int main(int argc,char **argv){try{
   check(d.dmas==((n==4 || n==8)?std::vector<unsigned>{0,1,3}:std::vector<unsigned>{}) && d.volume==sb,"Installer DMA/volume questions");
   check(m.ports==(n==9?std::vector<unsigned>{0x220,0x230,0x240,0x250,0x320,0x330,0x340,0x350}:std::vector<unsigned>{}),"Installer TAP-10 port list");
  }
- for(unsigned size:{29,30})for(unsigned d=0;d<10;++d)for(unsigned m=0;m<10;++m)for(unsigned volume:{0,1}) {
+ for(unsigned size:{28,29,30})for(unsigned d=0;d<10;++d)for(unsigned m=0;m<10;++m)for(unsigned volume:{0,1}) {
   std::vector<std::uint8_t> base(size,0x5a);base[0]=10;base[1]=0;base[4]=3;base[5]=0;
   auto expected=base;XeenSoundAnswers a;a.speech=d;a.music=m;
   const auto put=[&](unsigned at,unsigned v){expected[at]=v;expected[at+1]=v>>8;};
@@ -52,7 +52,7 @@ int main(int argc,char **argv){try{
   check(xeenSoundStatus(cfg,true)==((!cfg.music || cfg.deferredMusic())?"silent":"played"),"Music status predicate");
   check(xeenSoundStatus(cfg,false)==((!cfg.digital || cfg.deferredDigital())?"silent":"played"),"Digital status predicate");
  }
- for(unsigned n:{0,6,28,31}){bool refused=false;try{xeenValidateSetupBase(std::vector<std::uint8_t>(n));}catch(...){refused=true;}check(refused,"Malformed base accepted");}
+ for(unsigned n:{0,6,27,31}){bool refused=false;try{xeenValidateSetupBase(std::vector<std::uint8_t>(n));}catch(...){refused=true;}check(refused,"Malformed base accepted");}
  std::vector<std::uint8_t> base(30);base.back()=0xa5;
  XeenSoundAnswers a;a.speech=0;a.music=9;bool refused=false;try{xeenApplySoundSetup(base,a);}catch(...){refused=true;}check(refused,"TAP-10 needs port");
  a.music=0;a.dma=1;refused=false;try{xeenApplySoundSetup(base,a);}catch(...){refused=true;}check(refused,"Unasked DMA accepted");

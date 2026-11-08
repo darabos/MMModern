@@ -21,7 +21,7 @@ const std::array<XeenSoundRow,10> &xeenMusicMenu() {
  }};return rows;
 }
 void xeenValidateSetupBase(const std::vector<std::uint8_t> &bytes) {
- if(bytes.size()!=29 && bytes.size()!=30)throw std::runtime_error("Malformed XEEN.CFG: expected 29 or 30 bytes");
+    if(bytes.size()!=28 && bytes.size()!=29 && bytes.size()!=30)throw std::runtime_error("Malformed XEEN.CFG: expected 28, 29 or 30 bytes");
  const auto cfg=XeenAudioConfig::parse(bytes);
  if(cfg.digital>10 || cfg.music>9)throw std::runtime_error("Malformed XEEN.CFG: unknown device id");
 }
