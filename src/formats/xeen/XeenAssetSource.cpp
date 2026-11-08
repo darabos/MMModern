@@ -33,6 +33,14 @@ XeenAssetSource::XeenAssetSource(const GameInstallation &installation,
 }
 
 XeenAssetSource::~XeenAssetSource() = default;
+std::shared_ptr<const IndoorTexture> XeenAssetSource::spriteTexture(
+		const std::string &name, std::size_t frame, XeenSceneArchive archive) {
+	return _impl->bridge.spriteTexture(name, frame, archive);
+}
+void XeenAssetSource::beginInterfaceCoverage() { _impl->bridge.beginInterfaceCoverage(); }
+std::vector<std::uint8_t> XeenAssetSource::endInterfaceCoverage() {
+	return _impl->bridge.endInterfaceCoverage();
+}
 const XeenDosText &XeenAssetSource::uiText() {
  if(!_impl->text) {
   if(!_impl->installation.uiModule)throw std::runtime_error("Missing installed uncompressed DOS UI module; supply --ui-data");

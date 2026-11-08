@@ -4,6 +4,7 @@
 #include "formats/xeen/XeenLanguage.h"
 #include "core/GameInstallation.h"
 #include "core/IndexedFrame.h"
+#include "core/IndoorRenderScene.h"
 #include "formats/xeen/XeenSpriteDrawOptions.h"
 #include "formats/xeen/XeenMonsterAppearance.h"
 #include "formats/xeen/XeenDosText.h"
@@ -36,6 +37,9 @@ public:
 	void drawSprite(const std::string &resourceName, std::size_t frame, int x, int y,
 		const XeenSpriteDrawOptions &options);
 	IndexedFrame snapshot() const;
+	std::shared_ptr<const IndoorTexture> spriteTexture(const std::string &, std::size_t, XeenSceneArchive);
+	void beginInterfaceCoverage();
+	std::vector<std::uint8_t> endInterfaceCoverage();
  void blackenScene();
 	// Transient NPC composition uses the existing cache, never the world surface.
 	void drawNpc(IndexedFrame &frame, std::uint8_t portraitId, std::size_t portraitFrame,XeenSceneArchive archive=XeenSceneArchive::Current);

@@ -83,6 +83,38 @@ std::vector<std::uint8_t> readBytes(Common::SeekableReadStream &stream,
 
 class StreamSpriteResource final : public SpriteResource {
 public:
+	std::shared_ptr<const IndoorTexture> texture(std::size_t frame) const {
+		if (frame >= size()) throw std::runtime_error("Missing indoor texture frame");
+		int left = 65535, top = 65535, right = 0, bottom = 0;
+		const auto word = [&](std::size_t p) {
+			if (p + 2 > _filesize) throw std::runtime_error("Truncated indoor sprite header");
+			return int(_data[p]) | (int(_data[p + 1]) << 8);
+		};
+		for (const auto offset : {_index[frame]._offset1, _index[frame]._offset2}) {
+			if (!offset) continue;
+			const int x = word(offset), w = word(offset + 2);
+			const int y = word(offset + 4), h = word(offset + 6);
+			if (!w || !h) continue;
+			left = std::min(left, x); top = std::min(top, y);
+			right = std::max(right, x + w); bottom = std::max(bottom, y + h);
+		}
+		auto result = std::make_shared<IndoorTexture>();
+		if (right <= left || bottom <= top) return result;
+		result->width = right - left; result->height = bottom - top;
+		if (result->width > 1024 || result->height > 1024)
+			throw std::runtime_error("Indoor sprite texture exceeds 1024 pixels");
+		XSurface black(result->width, result->height), white(result->width, result->height);
+		black.clear(0); white.clear(255);
+		draw(black, int(frame), Common::Point(-left, -top), 0, 0);
+		draw(white, int(frame), Common::Point(-left, -top), 0, 0);
+		for (int y = 0; y < result->height; ++y) for (int x = 0; x < result->width; ++x) {
+			const auto a = *static_cast<const byte *>(black.getBasePtr(x, y));
+			const auto b = *static_cast<const byte *>(white.getBasePtr(x, y));
+			result->indices.push_back(a);
+			result->alpha.push_back(a == b ? 255 : 0);
+		}
+		return result;
+	}
 	bool loadFromStream(const Common::Path &filename, Common::SeekableReadStream &stream) {
 		_filename = filename;
 		SpriteResource::load(stream);
@@ -294,6 +326,8 @@ struct ScummVmXeenBridge::Impl {
 		std::unique_ptr<StreamSpriteResource> decoded;
 	};
 	std::unordered_map<std::string, CachedSprite> sprites;
+	std::unordered_map<std::string, std::shared_ptr<const IndoorTexture>> indoorTextures;
+	std::vector<std::uint8_t> interfaceCoverage;
 	std::size_t spriteLoads = 0;
 	std::unordered_map<std::string,std::vector<std::uint8_t>> admittedSprites;
 	bool spriteIntegrityFailed=false;
@@ -454,7 +488,27 @@ ScummVmXeenBridge::ScummVmXeenBridge(const GameInstallation &installation,
 
 ScummVmXeenBridge::~ScummVmXeenBridge() = default;
 
-void ScummVmXeenBridge::discardSpriteCache() { _impl->sprites.clear(); }
+void ScummVmXeenBridge::discardSpriteCache() {
+	_impl->sprites.clear();
+	_impl->indoorTextures.clear();
+}
+
+std::shared_ptr<const IndoorTexture> ScummVmXeenBridge::spriteTexture(
+		const std::string &name, std::size_t frame, XeenSceneArchive archive) {
+	const auto key = std::to_string(int(archive)) + ":" + name + ":" + std::to_string(frame);
+	const auto found = _impl->indoorTextures.find(key);
+	if (found != _impl->indoorTextures.end()) return found->second;
+	auto texture = _impl->sprite(name, std::nullopt, 0, true, archive).texture(frame);
+	_impl->indoorTextures.emplace(key, texture);
+	return texture;
+}
+
+void ScummVmXeenBridge::beginInterfaceCoverage() {
+	_impl->interfaceCoverage.assign(std::size_t(_impl->surface.w) * _impl->surface.h, 0);
+}
+std::vector<std::uint8_t> ScummVmXeenBridge::endInterfaceCoverage() {
+	return std::exchange(_impl->interfaceCoverage, {});
+}
 std::size_t ScummVmXeenBridge::cachedSpriteCount() const { return _impl->sprites.size(); }
 std::size_t ScummVmXeenBridge::spriteLoadCount() const { return _impl->spriteLoads; }
 
@@ -633,6 +687,16 @@ void ScummVmXeenBridge::drawSpriteImpl(const std::string &resourceName,
 		flags |= MM::Shared::Xeen::SPRFLAG_BOTTOM_CLIPPED;
 	}
 	const int scale = options.enlarge ? MM::Shared::Xeen::SCALE_ENLARGE : options.scaleIndex;
+	if (!_impl->interfaceCoverage.empty()) {
+		XSurface black(_impl->surface.w, _impl->surface.h), white(_impl->surface.w, _impl->surface.h);
+		black.clear(0); white.clear(255);
+		sprite.draw(black, int(frame), Common::Point(x, y), flags & ~0xfff, scale);
+		sprite.draw(white, int(frame), Common::Point(x, y), flags & ~0xfff, scale);
+		for (int row = 0; row < black.h; ++row) for (int col = 0; col < black.w; ++col)
+			if (*static_cast<const byte *>(black.getBasePtr(col, row)) ==
+					*static_cast<const byte *>(white.getBasePtr(col, row)))
+				_impl->interfaceCoverage[std::size_t(row) * black.w + col] = 1;
+	}
 	const auto mode=flags&0xf00;
 	if(mode==0x200 || mode==0x300 || mode==0x500) {
 		if(options.enlarge || _impl->surface.w!=320 || _impl->surface.h!=200)

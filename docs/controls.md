@@ -22,6 +22,7 @@ button has the same effect at the same position; use Escape to cancel.
 | = | Toggle the automap; Shift+= produces an unmatched + |
 | Tab | Control panel: Save, Save As, Load, Quit |
 | F9 | Save to the developer `--save-file` or `--load-game` target |
+| F11 (Fn+F11 if macOS uses F11 for a system shortcut) | Toggle original / experimental GPU indoor rendering; no gameplay pass |
 | Escape | Back, cancel or acknowledge; in exploration, complete a pass |
 | Arrows in the sheet | Select a stat |
 | Enter | Open the selected stat; choose a spell in the New list; confirm text entry |

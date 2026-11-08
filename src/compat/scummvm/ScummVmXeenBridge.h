@@ -3,6 +3,7 @@
 
 #include "core/GameInstallation.h"
 #include "core/IndexedFrame.h"
+#include "core/IndoorRenderScene.h"
 #include "formats/xeen/XeenSpriteDrawOptions.h"
 
 #include "games/xeen/XeenMapIdentity.h"
@@ -30,6 +31,9 @@ public:
 	void drawSprite(const std::string &resourceName, std::size_t frame, int x, int y,
 		const XeenSpriteDrawOptions &options);
 	IndexedFrame snapshot() const;
+	std::shared_ptr<const IndoorTexture> spriteTexture(const std::string &, std::size_t, XeenSceneArchive);
+	void beginInterfaceCoverage();
+	std::vector<std::uint8_t> endInterfaceCoverage();
  void blackenScene();
  IndexedFrame cursorImage();
  IndexedFrame cursorImage(XeenSceneArchive selection);

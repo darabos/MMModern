@@ -1,4 +1,5 @@
 #include "platform/sdl/SdlWindow.h"
+#include "platform/sdl/IndoorGpuRenderer.h"
 #include "core/DiagnosticNotice.h"
 #include "platform/sdl/SdlAudioDevice.h"
 #include "platform/sdl/SdlWindowPlacement.h"
@@ -29,6 +30,7 @@ namespace {
 constexpr Uint8 clearedKeyMake=2;
 constexpr std::uint64_t navigationRepeatDelay = 500000000;
 constexpr std::uint64_t navigationRepeatPeriod = (11000000000ULL + 119) / 120;
+bool modernIndoor = false;
 
 // Host window presentation shared by the title and gameplay windows.
 struct PlacementMemory {
@@ -57,22 +59,46 @@ void recordWindowedSize(SDL_Window *window) {
 	}
 }
 
-bool uploadFrame(SDL_Texture *texture, const IndexedFrame &frame,
-		int expectedWidth, int expectedHeight, std::vector<std::uint32_t> &pixels) {
+bool uploadFrame(SDL_Renderer *renderer, SDL_Texture *&texture, IndoorGpuRenderer &gpu,
+		const IndexedFrame &frame, int expectedWidth, int expectedHeight,
+		std::vector<std::uint32_t> &pixels, bool allowModern = true) {
 	if (!frame.isValid() || frame.width != expectedWidth || frame.height != expectedHeight) {
 		std::cerr << "Invalid indexed framebuffer or changed dimensions.\n";
 		return false;
 	}
-	pixels.resize(frame.pixels.size());
-	for (std::size_t idx = 0; idx < frame.pixels.size(); ++idx) {
+	bool enhanced = modernIndoor && allowModern && frame.indoorScene;
+	if (enhanced) {
+		try { pixels = gpu.render(frame); }
+		catch (const std::exception &error) {
+			modernIndoor = false;
+			enhanced = false;
+			std::cerr << "Indoor GPU renderer failed: " << error.what() << '\n';
+			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Indoor GPU renderer", error.what(), SDL_GetKeyboardFocus());
+		}
+	}
+	const int scale = enhanced ? 3 : 1;
+	if (!enhanced) pixels.resize(frame.pixels.size());
+	if (!enhanced) for (std::size_t idx = 0; idx < frame.pixels.size(); ++idx) {
 		const std::size_t paletteOffset = static_cast<std::size_t>(frame.pixels[idx]) * 3;
 		pixels[idx] = 0xff000000U |
 			(static_cast<std::uint32_t>(frame.palette[paletteOffset]) << 16) |
 			(static_cast<std::uint32_t>(frame.palette[paletteOffset + 1]) << 8) |
 			frame.palette[paletteOffset + 2];
 	}
+	int width = 0, height = 0;
+	if (texture && SDL_QueryTexture(texture, nullptr, nullptr, &width, &height) != 0)
+		throw std::runtime_error(std::string("Cannot query frame texture: ") + SDL_GetError());
+	if (!texture || width != frame.width * scale || height != frame.height * scale) {
+		auto *replacement = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+			SDL_TEXTUREACCESS_STREAMING, frame.width * scale, frame.height * scale);
+		if (!replacement) throw std::runtime_error(std::string("Cannot create frame texture: ") + SDL_GetError());
+		SDL_SetTextureScaleMode(replacement, SDL_ScaleModeNearest);
+		SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
+		if (texture) SDL_DestroyTexture(texture);
+		texture = replacement;
+	}
 	if (SDL_UpdateTexture(texture, nullptr, pixels.data(),
-			frame.width * static_cast<int>(sizeof(std::uint32_t))) != 0) {
+			frame.width * scale * static_cast<int>(sizeof(std::uint32_t))) != 0) {
 		std::cerr << "SDL_UpdateTexture failed: " << SDL_GetError() << '\n';
 		return false;
 	}
@@ -288,6 +314,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 			SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
 		}
 	} resources;
+	IndoorGpuRenderer gpu;
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 	auto &placement = placementMemory();
 	if (placement.file && !placement.loaded) placement.placement = placement.saved = readWindowPlacement(*placement.file);
@@ -329,7 +356,8 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		return false;
 	}
 
-	SDL_Texture *texture = resources.texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+	SDL_Texture *&texture = resources.texture;
+	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
 		SDL_TEXTUREACCESS_STREAMING, initialFrame.width, initialFrame.height);
 	if (!texture) {
 		std::cerr << "SDL_CreateTexture failed: " << SDL_GetError() << '\n';
@@ -432,6 +460,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 	std::optional<std::uint64_t> uploadedInput;
 	bool uploaded = false;
 	IndexedFrame displayContent;
+	bool allowModernDisplay = true;
 	const auto accepts = [&](const IndexedFrame::Presentation &frame) {
 		return !handler.acceptsFrame || handler.acceptsFrame(frame);
 	};
@@ -441,7 +470,10 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		const auto bound = supplied.presentation();
 		if (!accepts(bound)) return true;
 		const auto &content = bound ? *bound : supplied;
-		if (!uploadFrame(texture, content, initialFrame.width, initialFrame.height, pixels)) return false;
+		const auto context = handler.inputContext ? handler.inputContext(bound) : InputContext{};
+		allowModernDisplay = !context.dialog && (!handler.inputContext ||
+			context.mainScreen == MainScreen::Exploration || context.mainScreen == MainScreen::Combat);
+		if (!uploadFrame(renderer, texture, gpu, content, initialFrame.width, initialFrame.height, pixels, allowModernDisplay)) return false;
 		displayContent=content;
 		uploadedFrame = bound;
 		uploaded = true;
@@ -551,7 +583,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
     };
     const auto restoreMouseFeedback = [&] {
         if(!mouseFeedback)return;
-        if(!uploadFrame(texture,displayContent,initialFrame.width,initialFrame.height,pixels))throw std::runtime_error("Mouse feedback restoration failed");
+        if(!uploadFrame(renderer,texture,gpu,displayContent,initialFrame.width,initialFrame.height,pixels,allowModernDisplay))throw std::runtime_error("Mouse feedback restoration failed");
         present();mouseFeedback.reset();
     };
     const auto feedback = [&](const InputButton &button,const IndexedFrame::Presentation &origin,bool restore=true) {
@@ -568,7 +600,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
                 present();
             };
             const auto presentButton=[&](const IndexedFrame &frame) {
-                if(!uploadFrame(texture,frame,initialFrame.width,initialFrame.height,pixels))
+                if(!uploadFrame(renderer,texture,gpu,frame,initialFrame.width,initialFrame.height,pixels,allowModernDisplay))
                     throw std::runtime_error("Button feedback upload failed");
                 presentButtonTexture();
             };
@@ -602,9 +634,8 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
             if(resources.target) { SDL_DestroyTexture(resources.target); resources.target=nullptr; }
             if(event.type==SDL_RENDER_DEVICE_RESET) {
                 SDL_DestroyTexture(texture);
-                texture = resources.texture = SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,
-                    SDL_TEXTUREACCESS_STREAMING,initialFrame.width,initialFrame.height);
-                if(!texture || SDL_UpdateTexture(texture,nullptr,pixels.data(),initialFrame.width*4)!=0)
+                texture = nullptr;
+                if(!uploadFrame(renderer,texture,gpu,displayContent,initialFrame.width,initialFrame.height,pixels,allowModernDisplay))
                     throw std::runtime_error("Cannot restore frame after renderer reset");
                 SDL_SetTextureScaleMode(texture,SDL_ScaleModeNearest);
                 SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_NONE);
@@ -622,6 +653,30 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         if(event.type==SDL_AUDIODEVICEREMOVED && !event.adevice.iscapture) {
             SdlAudioDevice::removed(event.adevice.which);return;
         }
+		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F11) {
+			if (!event.key.repeat) {
+				modernIndoor = !modernIndoor;
+				try {
+					if (!uploadFrame(renderer, texture, gpu, displayContent, initialFrame.width,
+							initialFrame.height, pixels, allowModernDisplay))
+						throw std::runtime_error("Cannot upload switched indoor renderer");
+					present();
+					std::cerr << "Indoor renderer: " << (modernIndoor ? "experimental GPU (indoors only)" : "original") << '\n';
+				} catch (const std::exception &error) {
+					modernIndoor = false;
+					std::cerr << "Indoor GPU renderer failed: " << error.what() << '\n';
+					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Indoor GPU renderer", error.what(), window);
+					if (!uploadFrame(renderer, texture, gpu, displayContent, initialFrame.width,
+							initialFrame.height, pixels, allowModernDisplay))
+						throw std::runtime_error("Cannot restore original renderer");
+					present();
+				}
+			}
+			return;
+		}
+		if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_F11) return;
+		// The offscreen GL window must not affect the real window's focus/input state.
+		if (event.type == SDL_WINDOWEVENT && event.window.windowID != SDL_GetWindowID(window)) return;
         // Host window control, as in DOSBox: the game never receives Alt+Enter,
         // including its repeats; a plain Enter is unaffected.
         if(event.type==SDL_KEYDOWN && fullscreenToggleKey(event.key.keysym.sym,event.key.keysym.mod)) {

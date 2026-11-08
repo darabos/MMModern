@@ -3,6 +3,7 @@
 #include "formats/xeen/XeenAssetSource.h"
 #include "games/xeen/CloudsUiComposer.h"
 #include "games/xeen/XeenIndoorScene.h"
+#include "games/xeen/XeenIndoorRenderScene.h"
 #include "games/xeen/XeenWorld.h"
 #include "games/xeen/XeenMapView.h"
 #include "games/xeen/XeenSkills.h"
@@ -30,8 +31,13 @@ void CloudsMapComposer::drawOutdoorCommands(XeenAssetSource &assets,
 }
 
 void CloudsMapComposer::drawIndoorCommands(XeenAssetSource &assets,
-		const std::vector<XeenIndoorDrawCommand> &commands,XeenSceneArchive archive) const {
+		const std::vector<XeenIndoorDrawCommand> &commands,XeenSceneArchive archive,
+		std::vector<std::uint8_t> *effectCoverage) const {
 	for (const auto &command : commands) {
+		const auto *effectActor = command.actor();
+		const bool track = effectCoverage && (command.projectile() || command.splat() ||
+			(effectActor && effectActor->effectFlags));
+		if (track) assets.beginInterfaceCoverage();
 		auto options=command.drawOptions();
 		if(options.archive==XeenSceneArchive::Current)options.archive=archive;
 		if (const auto *object = command.object())
@@ -46,6 +52,10 @@ void CloudsMapComposer::drawIndoorCommands(XeenAssetSource &assets,
 		else
 			assets.drawSceneSprite(command.geometry().resourceName, command.geometry().frame,
 				command.x, command.y, options);
+		if (track) {
+			const auto coverage = assets.endInterfaceCoverage();
+			for (std::size_t i = 0; i < coverage.size(); ++i) (*effectCoverage)[i] |= coverage[i];
+		}
 	}
 }
 
@@ -84,6 +94,7 @@ IndexedFrame CloudsMapComposer::compose(XeenAssetSource &assets,
 	const auto archive=xeenMapResources(camera.mapId).ambient;
 	if (containsOrdinaryAnimation) *containsOrdinaryAnimation = false;
 	bool emittedAnimation = false;
+	std::shared_ptr<IndoorRenderScene> indoorScene;
 	if (objectDiagnostics) objectDiagnostics->clear();
 	const auto actors=world.sceneActors(camera.mapId,[&] {
 		const auto bytes=assets.readMonsterStatistics(xeenMapResources(camera.mapId).monsterTable);
@@ -116,12 +127,22 @@ IndexedFrame CloudsMapComposer::compose(XeenAssetSource &assets,
 			if(const auto *object=command.object()) return object->visual.status==XeenObjectVisualStatus::SupportedAnimated;
 			return !command.projectile() && !command.splat() && command.geometry().animated;
 		});
-		drawIndoorCommands(assets,commands,archive);
+		indoorScene = buildIndoorRenderScene(assets, world, camera, commands);
+		indoorScene->interfaceCoverage.assign(320 * 200, 0);
+		drawIndoorCommands(assets,commands,archive,&indoorScene->interfaceCoverage);
 	}
 
  // Obscure after scene/monsters, before overlapping border indicators.
- if(world.sceneIsBlack(partyState,camera))assets.blackenScene();
+ const bool black = world.sceneIsBlack(partyState,camera);
+ if(black)assets.blackenScene();
+	if (indoorScene) assets.beginInterfaceCoverage();
 	drawInterfaceLayers(assets, partyState, context,&world.scenePresentation(),archive);
+	if (indoorScene) {
+		const auto coverage = assets.endInterfaceCoverage();
+		for (std::size_t i = 0; i < coverage.size(); ++i)
+			indoorScene->interfaceCoverage[i] |= coverage[i];
+		indoorScene->black = black;
+	}
     if(partyState.encounterContext)for(auto i:{XeenPartyEffect::Levitate,XeenPartyEffect::Bless,XeenPartyEffect::PowerShield,XeenPartyEffect::HolyBonus,XeenPartyEffect::Heroism})
         emittedAnimation=emittedAnimation || partyState.encounterContext->effects[i]!=0;
 	const auto &indicators=world.scenePresentation();
@@ -134,6 +155,12 @@ IndexedFrame CloudsMapComposer::compose(XeenAssetSource &assets,
         },ordinaryPhase.value_or(0),
         partyState.encounterContext && partyState.encounterContext->effects[XeenPartyEffect::WizardEye]!=0);
 	if (containsOrdinaryAnimation) *containsOrdinaryAnimation = emittedAnimation;
+	if (indoorScene) {
+		indoorScene->originalPixels = result.pixels;
+		// Direction Sense occupies the last row of the scene.
+		std::fill_n(indoorScene->interfaceCoverage.begin() + 139 * 320, 320, 1);
+		result.indoorScene = std::move(indoorScene);
+	}
 	return result;
 }
 
