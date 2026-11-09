@@ -45,14 +45,14 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		return IndoorVertex{right, height - eyeHeight, -forward, u, v};
 	};
 	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices,
-			bool allowBehindParty = false) {
+			bool allowBehindParty = false, bool distort = true) {
 		if (!image->width || !image->height) return;
 		// Keep walls clipped at the party, but let horizontal surfaces and
 		// grounded objects extend toward the virtual eye behind it.
 		constexpr float clipZ = -0.04f;
 		if (allowBehindParty || std::all_of(vertices.begin(), vertices.end(),
 				[&](const auto &v) { return v.z <= clipZ; })) {
-			scene->quads.push_back({std::move(image), vertices});
+			scene->quads.push_back({std::move(image), vertices, distort});
 			return;
 		}
 		std::vector<IndoorVertex> clipped;
@@ -68,7 +68,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			previous = current;
 		}
 		for (std::size_t i = 1; i + 1 < clipped.size(); ++i)
-			scene->quads.push_back({image, {clipped[0], clipped[i], clipped[i + 1], clipped[i + 1]}});
+			scene->quads.push_back({image, {clipped[0], clipped[i], clipped[i + 1], clipped[i + 1]}, distort});
 	};
 	const auto ground = texture(prefix + ".gnd", 0, resources.ground);
 	const auto &drawing = world.scenePresentation().drawingState();
@@ -77,7 +77,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		if (!geometry || command.originalOrder != 1) continue;
 		const auto sky = texture(geometry->resourceName, geometry->frame, geometry->options.archive);
 		add(sky, {{{-12, -eyeHeight, -10, 0, 1}, {12, -eyeHeight, -10, 1, 1},
-			{12, 10, -10, 1, 0}, {-12, 10, -10, 0, 0}}});
+			{12, 10, -10, 1, 0}, {-12, 10, -10, 0, 0}}}, false, false);
 		break;
 	}
 	const auto wallTexture = [&](unsigned value, bool open) {

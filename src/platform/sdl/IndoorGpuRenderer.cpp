@@ -12,11 +12,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace mmodern {
 namespace {
@@ -88,6 +90,7 @@ struct IndoorGpuRenderer::Impl {
 	bgfx::VertexLayout layout;
 	bgfx::ProgramHandle program = BGFX_INVALID_HANDLE;
 	bgfx::UniformHandle sampler = BGFX_INVALID_HANDLE;
+	bgfx::UniformHandle distanceWarp = BGFX_INVALID_HANDLE;
 	bgfx::TextureHandle frameTexture = BGFX_INVALID_HANDLE, cursorTexture = BGFX_INVALID_HANDLE;
 	bgfx::FrameBufferHandle worldTarget = BGFX_INVALID_HANDLE, compositionTarget = BGFX_INVALID_HANDLE;
 	int cursorWidth = 0, cursorHeight = 0;
@@ -108,6 +111,7 @@ struct IndoorGpuRenderer::Impl {
 		releaseHandle(worldTarget); releaseHandle(compositionTarget);
 		releaseHandle(frameTexture); releaseHandle(cursorTexture);
 		releaseHandle(program); releaseHandle(sampler);
+		releaseHandle(distanceWarp);
 		bgfx::shutdown();
 		deviceActive = false;
 	}
@@ -146,6 +150,8 @@ struct IndoorGpuRenderer::Impl {
 		}
 		program = require(bgfx::createProgram(vertex, fragment, true), "Cannot link bgfx texture program");
 		sampler = require(bgfx::createUniform("s_image", bgfx::UniformType::Sampler), "Cannot create bgfx sampler");
+		distanceWarp = require(bgfx::createUniform("u_distanceWarp", bgfx::UniformType::Vec4),
+			"Cannot create bgfx distance warp uniform");
 		frameTexture = createTexture(frameWidth, frameHeight);
 		for (auto view : {worldView, compositionView, displayView}) bgfx::setViewMode(view, bgfx::ViewMode::Sequential);
 		bgfx::setViewName(worldView, "Indoor world");
@@ -181,13 +187,48 @@ struct IndoorGpuRenderer::Impl {
 	}
 
 	void draw(bgfx::ViewId view, bgfx::TextureHandle image, const std::array<IndoorVertex, 4> &quad,
-			std::uint64_t state, std::uint32_t sampling = std::uint32_t(pointSampling)) {
-		if (bgfx::getAvailTransientVertexBuffer(6, layout) != 6)
+			std::uint64_t state, std::uint32_t sampling = std::uint32_t(pointSampling),
+			bool distort = false) {
+		std::vector<IndoorVertex> vertices;
+		const auto append = [&](const std::vector<IndoorVertex> &polygon) {
+			for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+				vertices.insert(vertices.end(), {polygon[0], polygon[i], polygon[i + 1]});
+		};
+		if (distort) {
+			// Absolute depth slices keep adjacent meshes' shared edges aligned.
+			const auto clip = [](const std::vector<IndoorVertex> &polygon, float plane, bool above) {
+				std::vector<IndoorVertex> result;
+				if (polygon.empty()) return result;
+				auto previous = polygon.back();
+				const auto inside = [&](const auto &v) { return above ? v.z >= plane : v.z <= plane; };
+				for (const auto &current : polygon) {
+					if (inside(previous) != inside(current)) {
+						const float t = (plane - previous.z) / (current.z - previous.z);
+						const auto lerp = [&](float a, float b) { return a + t * (b - a); };
+						result.push_back({lerp(previous.x, current.x), lerp(previous.y, current.y), plane,
+							lerp(previous.u, current.u), lerp(previous.v, current.v)});
+					}
+					if (inside(current)) result.push_back(current);
+					previous = current;
+				}
+				return result;
+			};
+			float minimum = quad[0].z, maximum = minimum;
+			for (const auto &v : quad) { minimum = std::min(minimum, v.z); maximum = std::max(maximum, v.z); }
+			if (minimum == maximum) append({quad.begin(), quad.end()});
+			else for (float plane = std::floor(minimum * 8) / 8; plane < maximum; plane += 0.125f)
+				append(clip(clip({quad.begin(), quad.end()}, plane, true), plane + 0.125f, false));
+		} else append({quad.begin(), quad.end()});
+		const auto count = std::uint32_t(vertices.size());
+		if (!count) return;
+		if (bgfx::getAvailTransientVertexBuffer(count, layout) != count)
 			throw std::runtime_error("bgfx transient geometry buffer exhausted");
 		bgfx::TransientVertexBuffer buffer;
-		bgfx::allocTransientVertexBuffer(&buffer, 6, layout);
-		const IndoorVertex vertices[]{quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]};
-		std::memcpy(buffer.data, vertices, sizeof(vertices));
+		bgfx::allocTransientVertexBuffer(&buffer, count, layout);
+		std::memcpy(buffer.data, vertices.data(), vertices.size() * sizeof(IndoorVertex));
+		const std::array<float, 4> warp{{distort ? 1.f : 0.f,
+			distort ? 1.f - 2.f * frame.indoorScene->horizon / 132.f : 0.f, 0, 0}};
+		bgfx::setUniform(distanceWarp, warp.data());
 		bgfx::setVertexBuffer(0, &buffer);
 		bgfx::setTexture(0, sampler, image, sampling);
 		bgfx::setState(state);
@@ -305,7 +346,8 @@ struct IndoorGpuRenderer::Impl {
 			bgfx::touch(worldView);
 			if (!frame.indoorScene->black) for (const auto &quad : frame.indoorScene->quads)
 				draw(worldView, uploadTexture(quad.texture), quad.vertices,
-					colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL);
+					colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL,
+					std::uint32_t(pointSampling), quad.distort);
 		}
 		bgfx::setViewFrameBuffer(compositionView, compositionTarget);
 		bgfx::setViewRect(compositionView, 0, 0, std::uint16_t(frameWidth * wanted), std::uint16_t(frameHeight * wanted));

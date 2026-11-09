@@ -22,6 +22,7 @@ struct IndoorVertex {
 struct IndoorQuad {
 	std::shared_ptr<const IndoorTexture> texture;
 	std::array<IndoorVertex, 4> vertices;
+	bool distort = true;
 };
 
 // Camera-relative geometry; immutable once acquired by the presentation loop.
