@@ -180,6 +180,11 @@ add_library(mmodern_platform_sdl STATIC
 )
 target_link_libraries(mmodern_platform_sdl PUBLIC mmodern_core PRIVATE SDL2::SDL2 mmodern_platform_libs mmodern_platform_files)
 target_link_libraries(mmodern_platform_sdl PRIVATE bgfx)
+find_package(Threads REQUIRED)
+target_link_libraries(mmodern_platform_sdl PRIVATE Threads::Threads)
+if(APPLE)
+	target_link_libraries(mmodern_platform_sdl PRIVATE "-framework CoreGraphics")
+endif()
 target_include_directories(mmodern_platform_sdl PRIVATE "${MMODERN_SHADER_OUTPUT}")
 add_dependencies(mmodern_platform_sdl mmodern_bgfx_shaders)
 

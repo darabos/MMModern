@@ -308,17 +308,10 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         return windowToFrame(x, y, ww, wh, output.first, output.second, initialFrame.width, initialFrame.height,
 			corrected ? PictureAspect::FourThree : PictureAspect::Square);
     };
-	std::uint64_t lastPresentationStart = 0;
-	bool cursorDirty = false;
     const auto present = [&] {
-		std::optional<std::pair<int, int>> cursor;
-		if (resources.cursorHidden && SDL_GetMouseFocus() == window &&
-				!(handler.inputContext && handler.inputContext({}).hideCursor)) {
-			int x, y; SDL_GetMouseState(&x, &y); cursor = mappedMouse(x, y);
-		}
-		lastPresentationStart = SdlWindow::presentationNanoseconds();
-		gpu.present(cursor);
-		cursorDirty = false;
+		const bool cursorEnabled = resources.cursorHidden &&
+			!(handler.inputContext && handler.inputContext({}).hideCursor);
+		gpu.present(cursorEnabled);
     };
     // Borderless desktop fullscreen keeps the display mode. The active
     // presentation path re-centers the picture and maps the mouse.
@@ -506,7 +499,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
     const auto dispatchEvent = [&](const SDL_Event &event, const std::optional<std::uint64_t> &batchInput,
             const IndexedFrame::Presentation &batchFrame, const InputContext &batchContext) {
         if (event.type == SDL_MOUSEMOTION) {
-            if (event.motion.windowID == SDL_GetWindowID(window)) cursorDirty = true;
+            if (event.motion.windowID == SDL_GetWindowID(window)) gpu.mouseMoved();
             return;
         }
         if(event.type==SDL_RENDER_TARGETS_RESET || event.type==SDL_RENDER_DEVICE_RESET) {
@@ -540,6 +533,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		}
 		if (event.type == SDL_KEYUP && event.key.keysym.sym == SDLK_F11) return;
 		if (event.type == SDL_WINDOWEVENT && event.window.windowID != SDL_GetWindowID(window)) return;
+		if (event.type == SDL_WINDOWEVENT) gpu.refreshWindow();
         // Host window control, as in DOSBox: the game never receives Alt+Enter,
         // including its repeats; a plain Enter is unaffected.
         if(event.type==SDL_KEYDOWN && fullscreenToggleKey(event.key.keysym.sym,event.key.keysym.mod)) {
@@ -801,29 +795,24 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         }
         if(nextRepeat && *nextRepeat>repeatSample && !mouseButtons)
             wait=std::min(wait,int(std::min<std::uint64_t>(1000,PresentationClock::ceilMilliseconds(*nextRepeat-repeatSample))));
-        // Cosmetic flips stay inside this wait: no new gameplay cycle, idle
-        // work or frame-acquisition callbacks until the original wake/event.
+        // The render owner redraws independently, including while callbacks run.
+        // Motion alone must not start another gameplay cycle.
         const auto semanticWake = PresentationClock::checkedAdd(SdlWindow::presentationNanoseconds(),
             std::uint64_t(wait) * 1000000);
         bool receivedEvent = false;
         for (;;) {
             const auto now = SdlWindow::presentationNanoseconds();
-            const auto nextFrame = PresentationClock::checkedAdd(lastPresentationStart, 16666667);
-            const bool cosmetic = (gpu.animating() || cursorDirty) && nextFrame < semanticWake;
-            const auto wake = cosmetic ? nextFrame : semanticWake;
-            const int remaining = now >= wake ? 0 :
-                int(PresentationClock::ceilMilliseconds(wake - now));
+            const int remaining = now >= semanticWake ? 0 :
+                int(PresentationClock::ceilMilliseconds(semanticWake - now));
             receivedEvent = SDL_WaitEventTimeout(&event, remaining);
             if (receivedEvent && event.type == SDL_MOUSEMOTION &&
                     event.motion.windowID == SDL_GetWindowID(window)) {
-                cursorDirty = true;
+                gpu.mouseMoved();
                 receivedEvent = false;
                 if (SdlWindow::presentationNanoseconds() >= semanticWake) break;
-                if (cosmetic && SdlWindow::presentationNanoseconds() >= nextFrame) present();
                 continue;
             }
-            if (receivedEvent || !cosmetic || SdlWindow::presentationNanoseconds() >= semanticWake) break;
-            present();
+            break;
         }
         if (receivedEvent) {
 			do {

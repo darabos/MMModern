@@ -7,6 +7,10 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_syswm.h>
+#if defined(__APPLE__)
+#include <SDL_metal.h>
+#include <CoreGraphics/CoreGraphics.h>
+#endif
 #include <bgfx/bgfx.h>
 
 #include "vs_textured.h"
@@ -23,6 +27,11 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <optional>
+#include <thread>
 
 namespace mmodern {
 namespace {
@@ -125,8 +134,9 @@ bgfx::SwapChain swapChain(SDL_Window *window, int width, int height, bgfx::Platf
 }
 } // namespace
 
-struct IndoorGpuRenderer::Impl {
-	SDL_Window *window;
+struct GpuDevice {
+	bgfx::PlatformData platform;
+	bgfx::SwapChain initialChain;
 	int frameWidth, frameHeight, outputWidth = 0, outputHeight = 0, compositionScale = 0;
 	bool corrected, initialized = false, enhanced = false;
 	bgfx::SwapChain chain;
@@ -183,10 +193,10 @@ struct IndoorGpuRenderer::Impl {
 	std::unordered_multimap<std::size_t, std::weak_ptr<Mesh>> meshCache;
 	std::shared_ptr<const IndoorRenderScene> meshScene;
 
-	Impl(SDL_Window *window, int width, int height, bool corrected) :
-		window(window), frameWidth(width), frameHeight(height), corrected(corrected) {}
+	GpuDevice(bgfx::PlatformData platform, bgfx::SwapChain chain, int width, int height, bool corrected) :
+		platform(platform), initialChain(chain), frameWidth(width), frameHeight(height), corrected(corrected) {}
 
-	~Impl() {
+	~GpuDevice() {
 		if (!initialized) return;
 		batches.clear();
 		releaseHandle(rectangleVertices); releaseHandle(rectangleIndices);
@@ -203,8 +213,7 @@ struct IndoorGpuRenderer::Impl {
 
 	void initialize() {
 		if (deviceActive) throw std::runtime_error("Cannot initialize a second bgfx presentation loop");
-		int width = 0, height = 0;
-		SDL_GetWindowSizeInPixels(window, &width, &height);
+		const int width = int(initialChain.width), height = int(initialChain.height);
 		if (width <= 0 || height <= 0) throw std::runtime_error("Invalid bgfx window dimensions");
 		bgfx::Init init;
 #if defined(__APPLE__)
@@ -217,7 +226,8 @@ struct IndoorGpuRenderer::Impl {
 		// Shader binaries target this backend; never silently select an incompatible API.
 		init.fallback = false;
 		init.videoDecode = false;
-		chain = swapChain(window, width, height, init.platformData);
+		chain = initialChain;
+		init.platformData = platform;
 		init.swapChain = chain;
 		init.reset = resetFlags;
 		if (!bgfx::init(init)) throw std::runtime_error("Cannot initialize the bgfx graphics device");
@@ -521,11 +531,9 @@ struct IndoorGpuRenderer::Impl {
 		return image;
 	}
 
-	void present(std::optional<std::pair<int, int>> cursorPosition) {
+	bool present(std::optional<std::pair<int, int>> cursorPosition, int width, int height) {
 		advanceCamera();
-		int width = 0, height = 0;
-		SDL_GetWindowSizeInPixels(window, &width, &height);
-		if (width <= 0 || height <= 0 || !frame.isValid()) return;
+		if (width <= 0 || height <= 0 || !frame.isValid()) return false;
 		if (width > UINT16_MAX || height > UINT16_MAX) throw std::runtime_error("bgfx window is too large");
 		if (width != outputWidth || height != outputHeight) {
 			chain.width = std::uint32_t(width); chain.height = std::uint32_t(height);
@@ -631,39 +639,292 @@ struct IndoorGpuRenderer::Impl {
 		bgfx::setViewTransform(displayView, nullptr, displayProjection.data());
 		rectangle(displayView, bgfx::getTexture(compositionTarget), float(picture.x), float(picture.y),
 			float(picture.width), float(picture.height), true, false, corrected);
-		// Single-threaded bgfx presents before returning: acquisition still follows actual submission.
+		// All bgfx calls, including submission and destruction, belong to this thread.
 		bgfx::frame();
+		return true;
+	}
+	void cursor(const IndexedFrame &frame) {
+		if (!frame.isValid()) throw std::invalid_argument("Invalid original cursor");
+		releaseHandle(cursorTexture);
+		cursorTexture = createTexture(frame.width, frame.height);
+		cursorWidth = frame.width; cursorHeight = frame.height;
+		std::vector<std::uint8_t> rgba(frame.pixels.size() * 4);
+		for (std::size_t i = 0; i < frame.pixels.size(); ++i) {
+			const auto p = std::size_t(frame.pixels[i]) * 3;
+			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = frame.palette[p + c];
+			rgba[i * 4 + 3] = frame.pixels[i] ? 255 : 0;
+		}
+		bgfx::updateTexture2D(cursorTexture, 0, 0, 0, 0, std::uint16_t(frame.width), std::uint16_t(frame.height),
+			bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+	}
+};
+
+struct IndoorGpuRenderer::Impl {
+	struct HostState {
+		int x = 0, y = 0, width = 0, height = 0, outputWidth = 0, outputHeight = 0;
+		bool visible = false, cursorEnabled = false;
+		std::optional<std::pair<int,int>> eventCursor;
+	};
+	struct Upload {
+		IndexedFrame frame;
+		bool modern, gameplayLayers;
+	};
+	struct Request {
+		std::optional<Upload> upload;
+		std::optional<IndexedFrame> cursor;
+		HostState host;
+		bool present = false;
+		std::promise<void> complete;
+	};
+	SDL_Window *window;
+	int frameWidth, frameHeight;
+	bool corrected;
+#if !defined(__APPLE__) && !defined(_WIN32)
+	bool globalCursor = false;
+#endif
+#if defined(_WIN32)
+	HWND nativeWindow = nullptr;
+#endif
+#if defined(__APPLE__)
+	SDL_MetalView metalView = nullptr;
+#endif
+	std::thread thread;
+	mutable std::mutex mutex;
+	std::condition_variable wake;
+	std::shared_ptr<Request> request;
+	std::optional<HostState> pendingHost;
+	std::exception_ptr failure;
+	bool stopping = false;
+	std::uint64_t frames = 0;
+	std::optional<Upload> pendingUpload;
+	bool cursorEnabled = false;
+
+	HostState hostState(bool cursorEnabled) const {
+		HostState host;
+		SDL_GetWindowPosition(window,&host.x,&host.y);
+		SDL_GetWindowSize(window,&host.width,&host.height);
+		SDL_GetWindowSizeInPixels(window,&host.outputWidth,&host.outputHeight);
+		const auto flags = SDL_GetWindowFlags(window);
+		host.visible = (flags & SDL_WINDOW_SHOWN) && !(flags & SDL_WINDOW_MINIMIZED);
+		host.cursorEnabled = cursorEnabled && SDL_GetMouseFocus()==window;
+#if !defined(__APPLE__) && !defined(_WIN32)
+		if (!globalCursor && host.cursorEnabled) {
+			int x = 0, y = 0;
+			SDL_GetMouseState(&x,&y);
+			host.eventCursor = windowToFrame(x,y,host.width,host.height,
+				host.outputWidth,host.outputHeight,frameWidth,frameHeight,
+				corrected ? PictureAspect::FourThree : PictureAspect::Square);
+		}
+#endif
+		return host;
+	}
+
+	std::optional<std::pair<int,int>> sampleCursor(const HostState &host) const {
+		if (!host.cursorEnabled) return {};
+		int x = 0, y = 0;
+#if defined(__APPLE__)
+		// CoreGraphics samples the OS, not SDL's last main-thread event pump.
+		const auto event = CGEventCreate(nullptr);
+		if (!event) throw std::runtime_error("Cannot sample native cursor position");
+		const auto point = CGEventGetLocation(event);
+		CFRelease(event);
+		x = int(point.x); y = int(point.y);
+#elif defined(_WIN32)
+		POINT point;
+		if (!GetCursorPos(&point)) throw std::runtime_error("Cannot sample native cursor position");
+		if (!ScreenToClient(nativeWindow,&point)) throw std::runtime_error("Cannot map native cursor position");
+		x = point.x+host.x; y = point.y+host.y;
+#else
+		if (!globalCursor) return host.eventCursor;
+		SDL_GetGlobalMouseState(&x,&y);
+#endif
+		return windowToFrame(x-host.x,y-host.y,host.width,host.height,
+			host.outputWidth,host.outputHeight,frameWidth,frameHeight,
+			corrected ? PictureAspect::FourThree : PictureAspect::Square);
+	}
+
+	void run(bgfx::PlatformData platform, bgfx::SwapChain chain, std::promise<void> ready) noexcept {
+		std::shared_ptr<Request> active;
+		bool initialized = false;
+		try {
+			GpuDevice device(platform,chain,frameWidth,frameHeight,corrected);
+			device.initialize();
+			ready.set_value(); initialized = true;
+			HostState host;
+			bool hasFrame = false;
+			std::optional<Upload> retainedUpload;
+			auto nextFrame = std::chrono::steady_clock::now();
+			for (;;) {
+				std::optional<HostState> hostUpdate;
+				{
+					std::unique_lock<std::mutex> lock(mutex);
+					if (hasFrame && host.visible)
+						wake.wait_until(lock,nextFrame,[&] { return stopping || request || pendingHost; });
+					else wake.wait(lock,[&] { return stopping || request || pendingHost; });
+					if (stopping) break;
+					active = std::move(request);
+					hostUpdate = std::move(pendingHost);
+					pendingHost.reset();
+				}
+				if (hostUpdate) host = *hostUpdate;
+				if (active) {
+					if (active->cursor) device.cursor(*active->cursor);
+					if (active->upload) {
+						const auto &upload = *active->upload;
+						try {
+							device.updateFrame(upload.frame,upload.modern,upload.gameplayLayers);
+						} catch (const std::exception &error) {
+							if (!retainedUpload) throw;
+							const auto rejected = std::current_exception();
+							// Restore a coherent last frame before resuming autonomous redraws.
+							// If rollback also fails, the outer handler terminates the device.
+							device.updateFrame(retainedUpload->frame,retainedUpload->modern,retainedUpload->gameplayLayers);
+							std::cerr << "Render upload rejected: " << error.what() << '\n';
+							active->complete.set_exception(rejected);
+							active.reset();
+							continue;
+						}
+						retainedUpload = std::move(active->upload);
+						hasFrame = true;
+					}
+					if (active->present) host = active->host;
+				}
+				if (hasFrame && ((active && active->present) ||
+						(host.visible && std::chrono::steady_clock::now() >= nextFrame))) {
+					const auto started = std::chrono::steady_clock::now();
+					if (device.present(sampleCursor(host),host.outputWidth,host.outputHeight)) {
+						std::lock_guard<std::mutex> lock(mutex);
+						++frames;
+					}
+					const auto deadline = active && active->present ? started : nextFrame;
+					nextFrame = std::max(deadline + std::chrono::nanoseconds(16666667),
+						std::chrono::steady_clock::now());
+				}
+				if (active) {
+					active->complete.set_value();
+					active.reset();
+				}
+			}
+		} catch (...) {
+			const auto error = std::current_exception();
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				failure = error;
+				if (request) { request->complete.set_exception(error); request.reset(); }
+			}
+			if (active) active->complete.set_exception(error);
+			if (!initialized) ready.set_exception(error);
+			try { std::rethrow_exception(error); }
+			catch (const std::exception &message) { std::cerr << "Render thread failed: " << message.what() << '\n'; }
+			catch (...) { std::cerr << "Render thread failed: unknown graphics error\n"; }
+		}
+	}
+
+	Impl(SDL_Window *window, int width, int height, bool corrected) :
+		window(window),frameWidth(width),frameHeight(height),corrected(corrected) {
+		try {
+#if !defined(__APPLE__) && !defined(_WIN32)
+			const auto driver = SDL_GetCurrentVideoDriver();
+			globalCursor = driver && std::strcmp(driver,"x11")==0;
+			if (!globalCursor)
+				std::cerr << "SDL backend has no global cursor query; cursor follows main-thread event samples\n";
+#endif
+			auto host = hostState(false);
+			bgfx::PlatformData platform;
+			auto chain = swapChain(window,host.outputWidth,host.outputHeight,platform);
+#if defined(_WIN32)
+			nativeWindow = static_cast<HWND>(chain.nwh);
+#endif
+#if defined(__APPLE__)
+			// Cocoa layer creation must happen on the window thread, before we wait.
+			metalView = SDL_Metal_CreateView(window);
+			if (!metalView) throw std::runtime_error(std::string("Cannot create Metal view: ")+SDL_GetError());
+			chain.nwh = SDL_Metal_GetLayer(metalView);
+			if (!chain.nwh) throw std::runtime_error("Cannot obtain Metal layer");
+#endif
+			std::promise<void> ready;
+			auto completion = ready.get_future();
+			thread = std::thread([this,platform,chain,ready=std::move(ready)]() mutable {
+				run(platform,chain,std::move(ready));
+			});
+			completion.get();
+		} catch (...) {
+			if (thread.joinable()) thread.join();
+#if defined(__APPLE__)
+			if (metalView) SDL_Metal_DestroyView(metalView);
+#endif
+			throw;
+		}
+	}
+	~Impl() {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			stopping = true;
+		}
+		wake.notify_one();
+		if (thread.joinable()) thread.join();
+#if defined(__APPLE__)
+		if (metalView) SDL_Metal_DestroyView(metalView);
+#endif
+	}
+	void submit(const std::shared_ptr<Request> &next) {
+		auto complete = next->complete.get_future();
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (failure) std::rethrow_exception(failure);
+			if (stopping || request) throw std::logic_error("Invalid render-thread request");
+			request = next;
+		}
+		wake.notify_one();
+		complete.get();
 	}
 };
 
 IndoorGpuRenderer::IndoorGpuRenderer(SDL_Window *window, int width, int height, bool corrected) :
-	_impl(std::make_unique<Impl>(window, width, height, corrected)) {
-	_impl->initialize();
-}
+	_impl(std::make_unique<Impl>(window,width,height,corrected)) {}
 IndoorGpuRenderer::~IndoorGpuRenderer() = default;
 void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowGameplayLayers) {
-	_impl->updateFrame(frame, modern, allowGameplayLayers);
+	if (!frame.isValid() || frame.width!=_impl->frameWidth || frame.height!=_impl->frameHeight)
+		throw std::invalid_argument("Invalid render-thread framebuffer");
+	// Stage on the producer: an unpresented handoff must not leak into redraws.
+	_impl->pendingUpload = Impl::Upload{frame,modern,allowGameplayLayers};
 }
-bool IndoorGpuRenderer::animating() const { return _impl->modernEnabled && _impl->camera.moving(); }
-void IndoorGpuRenderer::present(std::optional<std::pair<int, int>> cursorPosition) { _impl->present(cursorPosition); }
-std::pair<int, int> IndoorGpuRenderer::outputSize() const {
+void IndoorGpuRenderer::present(bool cursorEnabled) {
+	auto request = std::make_shared<Impl::Request>();
+	_impl->cursorEnabled = cursorEnabled;
+	request->host = _impl->hostState(cursorEnabled);
+	request->upload = std::move(_impl->pendingUpload);
+	_impl->pendingUpload.reset();
+	request->present = true;
+	_impl->submit(request);
+}
+void IndoorGpuRenderer::refreshWindow() {
+	const auto host = _impl->hostState(_impl->cursorEnabled);
+	{
+		std::lock_guard<std::mutex> lock(_impl->mutex);
+		if (_impl->failure) std::rethrow_exception(_impl->failure);
+		_impl->pendingHost = host;
+	}
+	_impl->wake.notify_one();
+}
+void IndoorGpuRenderer::mouseMoved() {
+#if !defined(__APPLE__) && !defined(_WIN32)
+	if (!_impl->globalCursor) refreshWindow();
+#endif
+}
+std::uint64_t IndoorGpuRenderer::presentedFrames() const {
+	std::lock_guard<std::mutex> lock(_impl->mutex);
+	if (_impl->failure) std::rethrow_exception(_impl->failure);
+	return _impl->frames;
+}
+std::pair<int,int> IndoorGpuRenderer::outputSize() const {
 	int width = 0, height = 0;
-	SDL_GetWindowSizeInPixels(_impl->window, &width, &height);
-	return {width, height};
+	SDL_GetWindowSizeInPixels(_impl->window,&width,&height);
+	return {width,height};
 }
 void IndoorGpuRenderer::cursor(const IndexedFrame &frame) {
-	if (!frame.isValid()) throw std::invalid_argument("Invalid original cursor");
-	auto &r = *_impl;
-	releaseHandle(r.cursorTexture);
-	r.cursorTexture = r.createTexture(frame.width, frame.height);
-	r.cursorWidth = frame.width; r.cursorHeight = frame.height;
-	std::vector<std::uint8_t> rgba(frame.pixels.size() * 4);
-	for (std::size_t i = 0; i < frame.pixels.size(); ++i) {
-		const auto p = std::size_t(frame.pixels[i]) * 3;
-		for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = frame.palette[p + c];
-		rgba[i * 4 + 3] = frame.pixels[i] ? 255 : 0;
-	}
-	bgfx::updateTexture2D(r.cursorTexture, 0, 0, 0, 0, std::uint16_t(frame.width), std::uint16_t(frame.height),
-		bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+	auto request = std::make_shared<Impl::Request>();
+	request->cursor = frame;
+	_impl->submit(request);
 }
 } // namespace mmodern

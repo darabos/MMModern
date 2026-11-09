@@ -3,7 +3,6 @@
 
 #include "core/IndexedFrame.h"
 #include <memory>
-#include <optional>
 #include <utility>
 
 struct SDL_Window;
@@ -11,14 +10,18 @@ struct SDL_Window;
 namespace mmodern {
 class IndoorGpuRenderer {
 public:
+	// Window-facing methods are main-thread only; bgfx is owned by a private worker.
 	IndoorGpuRenderer(SDL_Window *, int frameWidth, int frameHeight, bool correctedAspect);
 	~IndoorGpuRenderer();
 	IndoorGpuRenderer(const IndoorGpuRenderer &) = delete;
 	IndoorGpuRenderer &operator=(const IndoorGpuRenderer &) = delete;
 	void upload(const IndexedFrame &, bool modern, bool allowGameplayLayers = true);
 	void cursor(const IndexedFrame &);
-	void present(std::optional<std::pair<int, int>> cursorPosition);
-	bool animating() const;
+	// Waits for this frame's actual submission; autonomous redraws never acquire input.
+	void present(bool cursorEnabled = false);
+	void refreshWindow();
+	void mouseMoved();
+	std::uint64_t presentedFrames() const;
 	std::pair<int, int> outputSize() const;
 private:
 	struct Impl;
