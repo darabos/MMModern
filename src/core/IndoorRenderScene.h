@@ -10,6 +10,8 @@ namespace mmodern {
 
 struct IndoorTexture {
 	int width = 0, height = 0;
+	// Cropped bounds relative to the original sprite's draw anchor.
+	int originX = 0, originY = 0;
 	std::vector<std::uint8_t> indices, alpha;
 };
 

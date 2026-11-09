@@ -101,6 +101,7 @@ public:
 		auto result = std::make_shared<IndoorTexture>();
 		if (right <= left || bottom <= top) return result;
 		result->width = right - left; result->height = bottom - top;
+		result->originX = left; result->originY = top;
 		if (result->width > 1024 || result->height > 1024)
 			throw std::runtime_error("Indoor sprite texture exceeds 1024 pixels");
 		XSurface black(result->width, result->height), white(result->width, result->height);

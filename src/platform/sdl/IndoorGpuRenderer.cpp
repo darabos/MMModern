@@ -281,10 +281,10 @@ struct IndoorGpuRenderer::Impl {
 			bgfx::setViewRect(worldView, 0, 0, 216 * 3, 132 * 3);
 			bgfx::setViewClear(worldView, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.f, 0);
 			const auto &scene = *frame.indoorScene;
-			// Set back the virtual eye, but keep clipping at the party rather
-			// than exposing walls behind it. The original 4:3 stretch happens
-			// during presentation, not in this native-pixel calibration.
-			const float nearPlane = scene.cameraSetback + 0.04f;
+			// Environment is clipped at the party by the scene builder;
+			// grounded objects may sit closer to the virtual eye.
+			// The original 4:3 stretch happens during presentation.
+			constexpr float nearPlane = 0.04f;
 			const float farPlane = scene.cameraSetback + 12.f;
 			std::array<float, 16> view{};
 			view[0] = view[5] = view[10] = view[15] = 1;

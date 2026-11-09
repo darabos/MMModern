@@ -1,4 +1,5 @@
 #include "games/xeen/XeenIndoorRenderScene.h"
+#include "games/xeen/XeenIndoorSceneTables.h"
 #include "formats/xeen/XeenAssetSource.h"
 #include "games/xeen/XeenWorld.h"
 
@@ -43,8 +44,31 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		}
 		return IndoorVertex{right, height - eyeHeight, -forward, u, v};
 	};
-	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices) {
-		if (image->width && image->height) scene->quads.push_back({std::move(image), vertices});
+	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices,
+			bool foreground = false) {
+		if (!image->width || !image->height) return;
+		// The virtual eye is behind the party. Keep environment geometry
+		// clipped at the party while allowing grounded foreground objects closer.
+		constexpr float clipZ = -0.04f;
+		if (foreground || std::all_of(vertices.begin(), vertices.end(),
+				[&](const auto &v) { return v.z <= clipZ; })) {
+			scene->quads.push_back({std::move(image), vertices});
+			return;
+		}
+		std::vector<IndoorVertex> clipped;
+		auto previous = vertices.back();
+		for (const auto &current : vertices) {
+			if ((previous.z <= clipZ) != (current.z <= clipZ)) {
+				const float t = (clipZ - previous.z) / (current.z - previous.z);
+				const auto lerp = [&](float a, float b) { return a + t * (b - a); };
+				clipped.push_back({lerp(previous.x, current.x), lerp(previous.y, current.y), clipZ,
+					lerp(previous.u, current.u), lerp(previous.v, current.v)});
+			}
+			if (current.z <= clipZ) clipped.push_back(current);
+			previous = current;
+		}
+		for (std::size_t i = 1; i + 1 < clipped.size(); ++i)
+			scene->quads.push_back({image, {clipped[0], clipped[i], clipped[i + 1], clipped[i + 1]}});
 	};
 	const auto ground = texture(prefix + ".gnd", 0, resources.ground);
 	const auto &drawing = world.scenePresentation().drawingState();
@@ -109,6 +133,35 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			image = texture(object->visual.spriteName, object->visual.frame,
 				xeenMapResources(object->visual.identity.mapId).objectArt);
 			flip = object->visual.horizontalFlip;
+			if (!image->width || !image->height) continue;
+			// setIndoorsObjects draws the interaction position unscaled at
+			// (-5,2), or (-35,-65) for the exceptional resource. Preserve
+			// sprite header offsets rather than centering the cropped image.
+			const auto &record = world.effectiveObject(object->visual.identity);
+			const bool special = record.resourceId ==
+				(camera.mapId.side == XeenSide::Clouds ? 113 : 47);
+			const auto &placement = xeen_indoor_scene_tables::kObjectPlacements.front();
+			const auto anchor = special ? 1u : 0u;
+			const float screenBottom = placement.y[anchor] + image->originY + image->height;
+			const float belowHorizon = screenBottom - (scene->horizon + 8.f);
+			// Solve floor contact along the original bottom-corner rays.
+			// Floating artwork stays floating; only submerged bases move.
+			const float distance = belowHorizon > 0 ?
+				std::min(scene->cameraSetback + 0.4f, scene->focalLength * eyeHeight / belowHorizon) :
+				scene->cameraSetback + 0.4f;
+			const float unitsPerPixel = distance / scene->focalLength;
+			auto center = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
+			center.z += scene->cameraSetback - distance;
+			const float left = center.x +
+				(placement.x[anchor] + image->originX - 116.f) * unitsPerPixel;
+			const float top = (scene->horizon + 8.f -
+				(placement.y[anchor] + image->originY)) * unitsPerPixel;
+			const float right = left + image->width * unitsPerPixel;
+			const float bottom = top - image->height * unitsPerPixel;
+			const float u0 = flip ? 1.f : 0.f, u1 = 1.f - u0;
+			add(image, {{{left, bottom, center.z, u0, 1}, {right, bottom, center.z, u1, 1},
+				{right, top, center.z, u1, 0}, {left, top, center.z, u0, 0}}}, true);
+			continue;
 		} else if (const auto *actor = command.actor()) {
 			if (actor->effectFlags) continue; // Original effect pixels are retained as an overlay.
 			const auto name = actor->kind == XeenMonsterSpriteKind::Attack ?
