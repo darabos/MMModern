@@ -1,10 +1,10 @@
 $input a_position, a_texcoord0, a_texcoord1
-$output v_texcoord0, v_clip
+$output v_texcoord0, v_clip, v_fog
 
 #include <bgfx_shader.sh>
 
 uniform vec4 u_distanceWarp; // enabled, horizon, eye setback, wall clipping
-uniform vec4 u_geometry; // mode: sky=-1, UI=0, world=1, billboard=2; UV flip
+uniform vec4 u_geometry; // mode: sky=-1, UI=0, world=1, billboard=2; UV flip; mip bias
 uniform vec4 u_cameraPosition;
 
 void main()
@@ -17,6 +17,8 @@ void main()
 		position = vec4(a_position.xy, a_position.z - u_distanceWarp.z, 1.0);
 	gl_Position = mul(u_proj, position);
 	float depth = -position.z - u_distanceWarp.z;
+	// Native cell depth, before the artistic perspective warp.
+	v_fog = u_geometry.x > 0.5 ? max(depth, 0.0) : 0.0;
 	v_clip = vec2(1.0, 1.0);
 	if (u_distanceWarp.w > 0.5)
 		v_clip = vec2(depth - 0.04, dot(a_texcoord1.zw, u_cameraPosition.xy - a_position.xz));

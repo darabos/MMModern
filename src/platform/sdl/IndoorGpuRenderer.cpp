@@ -37,8 +37,11 @@ namespace mmodern {
 namespace {
 constexpr std::uint64_t pointSampling = BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT |
 	BGFX_SAMPLER_MIP_POINT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+constexpr std::uint64_t worldSampling = BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_POINT |
+	BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
 constexpr std::uint64_t colorWrite = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A;
-constexpr std::uint32_t resetFlags = BGFX_RESET_VSYNC | BGFX_RESET_FLIP_AFTER_RENDER;
+constexpr std::uint32_t resetFlags = BGFX_RESET_VSYNC | BGFX_RESET_FLIP_AFTER_RENDER |
+	BGFX_RESET_MAXANISOTROPY;
 constexpr bgfx::ViewId worldView = 0, compositionView = 1, displayView = 2;
 enum MeshFlags : unsigned { Distort = 1, Wall = 2, Billboard = 4 };
 bool deviceActive = false;
@@ -172,7 +175,8 @@ struct GpuDevice {
 	}
 	struct Texture {
 		std::weak_ptr<const IndoorTexture> source;
-		bgfx::TextureHandle handle;
+		bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
+		bgfx::TextureHandle mipHandle = BGFX_INVALID_HANDLE;
 	};
 	std::unordered_map<const IndoorTexture *, Texture> textures;
 	std::array<std::uint8_t, 768> palette{};
@@ -201,7 +205,10 @@ struct GpuDevice {
 		batches.clear();
 		releaseHandle(rectangleVertices); releaseHandle(rectangleIndices);
 		releaseHandle(uiVertices); releaseHandle(overlayTexture);
-		for (auto &entry : textures) releaseHandle(entry.second.handle);
+		for (auto &entry : textures) {
+			releaseHandle(entry.second.handle);
+			releaseHandle(entry.second.mipHandle);
+		}
 		releaseHandle(worldTarget); releaseHandle(compositionTarget);
 		releaseHandle(frameTexture); releaseHandle(cursorTexture);
 		releaseHandle(program); releaseHandle(sampler);
@@ -267,11 +274,12 @@ struct GpuDevice {
 		std::cerr << "bgfx presenter: " << bgfx::getRendererName(bgfx::getRendererType()) << '\n';
 	}
 
-	bgfx::TextureHandle createTexture(int width, int height, std::uint64_t flags = pointSampling) {
+	bgfx::TextureHandle createTexture(int width, int height, std::uint64_t flags = pointSampling,
+			bool mipmaps = false) {
 		if (width <= 0 || height <= 0 || width > bgfx::getCaps()->limits.maxTextureSize ||
 				height > bgfx::getCaps()->limits.maxTextureSize)
 			throw std::runtime_error("Texture dimensions exceed bgfx device limits");
-		return require(bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), false, 1,
+		return require(bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), mipmaps, 1,
 			bgfx::TextureFormat::RGBA8, flags), "Cannot allocate bgfx texture");
 	}
 
@@ -474,11 +482,13 @@ struct GpuDevice {
 		if (enhanced || gpuHud) {
 			for (auto it = textures.begin(); it != textures.end();) {
 				if (it->second.source.expired() || palette != supplied.palette) {
-					releaseHandle(it->second.handle); it = textures.erase(it);
+					releaseHandle(it->second.handle);
+					releaseHandle(it->second.mipHandle);
+					it = textures.erase(it);
 				} else ++it;
 			}
 			palette = supplied.palette;
-			if (enhanced) for (auto &batch : batches) batch.image = uploadTexture(batch.texture);
+			if (enhanced) for (auto &batch : batches) batch.image = uploadTexture(batch.texture, true);
 			if (gpuHud) for (auto &draw : uiDraws) draw.image = uploadTexture(draw.texture);
 		}
 		std::vector<std::uint8_t> rgba(supplied.pixels.size() * 4);
@@ -512,9 +522,14 @@ struct GpuDevice {
 		frame = supplied;
 	}
 
-	bgfx::TextureHandle uploadTexture(const std::shared_ptr<const IndoorTexture> &source) {
+	bgfx::TextureHandle uploadTexture(const std::shared_ptr<const IndoorTexture> &source, bool mipmaps = false) {
 		const auto found = textures.find(source.get());
-		if (found != textures.end()) return found->second.handle;
+		if (found != textures.end()) {
+			const auto image = mipmaps ? found->second.mipHandle : found->second.handle;
+			if (bgfx::isValid(image)) return image;
+		}
+		if (source->width <= 0 || source->height <= 0)
+			throw std::invalid_argument("Invalid indoor texture dimensions");
 		const auto count = std::size_t(source->width) * source->height;
 		if (source->indices.size() != count || source->alpha.size() != count)
 			throw std::invalid_argument("Invalid indoor texture payload");
@@ -524,10 +539,37 @@ struct GpuDevice {
 			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = palette[p + c];
 			rgba[i * 4 + 3] = source->alpha[i];
 		}
-		auto image = createTexture(source->width, source->height);
-		bgfx::updateTexture2D(image, 0, 0, 0, 0, std::uint16_t(source->width), std::uint16_t(source->height),
-			bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
-		textures.emplace(source.get(), Texture{source, image});
+		const auto sampling = mipmaps ? worldSampling : pointSampling;
+		auto image = createTexture(source->width, source->height, sampling, mipmaps);
+		int width = source->width, height = source->height;
+		for (std::uint8_t level = 0;; ++level) {
+			bgfx::updateTexture2D(image, 0, level, 0, 0, std::uint16_t(width), std::uint16_t(height),
+				bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+			if (!mipmaps || (width == 1 && height == 1)) break;
+			const int nextWidth = std::max(1,width/2), nextHeight = std::max(1,height/2);
+			std::vector<std::uint8_t> next(std::size_t(nextWidth)*nextHeight*4);
+			for (int y = 0; y < nextHeight; ++y) for (int x = 0; x < nextWidth; ++x) {
+				unsigned alpha = 0, samples = 0;
+				std::array<unsigned,3> color{};
+				// Include odd edge texels and average in premultiplied-alpha space
+				// so transparent sprite borders do not introduce dark fringes.
+				for (int sy = y*height/nextHeight; sy < (y+1)*height/nextHeight; ++sy)
+					for (int sx = x*width/nextWidth; sx < (x+1)*width/nextWidth; ++sx) {
+						const auto offset = (std::size_t(sy)*width+sx)*4;
+						const unsigned a = rgba[offset+3];
+						for (unsigned c = 0; c < 3; ++c) color[c] += unsigned(rgba[offset+c])*a;
+						alpha += a; ++samples;
+					}
+				const auto offset = (std::size_t(y)*nextWidth+x)*4;
+				for (unsigned c = 0; c < 3; ++c)
+					next[offset+c] = alpha ? std::uint8_t((color[c]+alpha/2)/alpha) : 0;
+				next[offset+3] = std::uint8_t((alpha+samples/2)/samples);
+			}
+			rgba = std::move(next); width = nextWidth; height = nextHeight;
+		}
+		auto &cached = textures[source.get()];
+		cached.source = source;
+		(mipmaps ? cached.mipHandle : cached.handle) = image;
 		return image;
 	}
 
@@ -595,14 +637,15 @@ struct GpuDevice {
 				const bool distort = mesh.flags & Distort, wall = mesh.flags & Wall, billboard = mesh.flags & Billboard;
 				const std::array<float, 4> warp{{distort ? 1.f : 0.f,
 					1.f - 2.f * scene.horizon / 132.f, scene.cameraSetback, wall ? 1.f : 0.f}};
-				const std::array<float, 4> options{{distort ? (billboard ? 2.f : 1.f) : -1.f, 0, 0, 0}};
+				const std::array<float, 4> options{{distort ? (billboard ? 2.f : 1.f) : -1.f,
+					0, distort ? -0.75f : 0.f, 0}};
 				bgfx::setTransform(identity.data());
 				bgfx::setUniform(distanceWarp, warp.data());
 				bgfx::setUniform(geometry, options.data());
 				bgfx::setUniform(cameraPosition, eye.data());
 				bgfx::setVertexBuffer(0, mesh.vertices);
 				bgfx::setIndexBuffer(mesh.indices);
-				bgfx::setTexture(0, sampler, batch.image, std::uint32_t(pointSampling));
+				bgfx::setTexture(0, sampler, batch.image, std::uint32_t(worldSampling));
 				bgfx::setState(colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL);
 				bgfx::submit(worldView, program);
 			}
