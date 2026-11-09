@@ -308,12 +308,14 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         return windowToFrame(x, y, ww, wh, output.first, output.second, initialFrame.width, initialFrame.height,
 			corrected ? PictureAspect::FourThree : PictureAspect::Square);
     };
+	std::uint64_t lastPresentationStart = 0;
     const auto present = [&] {
 		std::optional<std::pair<int, int>> cursor;
 		if (resources.cursorHidden && SDL_GetMouseFocus() == window &&
 				!(handler.inputContext && handler.inputContext({}).hideCursor)) {
 			int x, y; SDL_GetMouseState(&x, &y); cursor = mappedMouse(x, y);
 		}
+		lastPresentationStart = SdlWindow::presentationNanoseconds();
 		gpu.present(cursor);
     };
     // Borderless desktop fullscreen keeps the display mode. The active
@@ -800,10 +802,12 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         bool receivedEvent = false;
         for (;;) {
             const auto now = SdlWindow::presentationNanoseconds();
-            const int remaining = now >= semanticWake ? 0 :
-                int(PresentationClock::ceilMilliseconds(semanticWake - now));
-            const bool cosmetic = gpu.animating() && remaining > 16;
-            receivedEvent = SDL_WaitEventTimeout(&event, cosmetic ? 16 : remaining);
+            const auto nextFrame = PresentationClock::checkedAdd(lastPresentationStart, 16666667);
+            const bool cosmetic = gpu.animating() && nextFrame < semanticWake;
+            const auto wake = cosmetic ? nextFrame : semanticWake;
+            const int remaining = now >= wake ? 0 :
+                int(PresentationClock::ceilMilliseconds(wake - now));
+            receivedEvent = SDL_WaitEventTimeout(&event, remaining);
             if (receivedEvent || !cosmetic || SdlWindow::presentationNanoseconds() >= semanticWake) break;
             present();
         }
