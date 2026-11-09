@@ -92,7 +92,7 @@ void blit(mmodern::IndoorTexture &dest, const mmodern::IndoorTexture &source, in
 	}
 }
 
-void extract(const fs::path &game, const fs::path &output) {
+void extract(const fs::path &game, const fs::path &output, bool portraits) {
 	const auto repository = fs::weakly_canonical(MMODERN_REPOSITORY_ROOT);
 	const auto destination = fs::weakly_canonical(output);
 	if (std::mismatch(repository.begin(), repository.end(), destination.begin(), destination.end()).first == repository.end())
@@ -102,7 +102,7 @@ void extract(const fs::path &game, const fs::path &output) {
 	if (fs::exists(output)) throw std::runtime_error("Output already exists; choose a new directory");
 	fs::create_directories(output);
 	mmodern::ScummVmXeenBridge assets(*installation);
-	std::ofstream manifest(output / "tiles.csv");
+	std::ofstream manifest(output / (portraits ? "portraits.csv" : "tiles.csv"));
 	manifest << "file,resource,frame,depth,phase,origin_x,origin_y,width,height\n";
 	unsigned count = 0, materials = 0;
 	for (bool dark : {false, true}) {
@@ -117,6 +117,31 @@ void extract(const fs::path &game, const fs::path &output) {
 				<< phase << ',' << originX << ',' << originY << ',' << image.width << ',' << image.height << '\n';
 			++count;
 		};
+		if (portraits) {
+			const auto exportPortrait = [&](const std::string &resource, const char *category) {
+				if (!assets.hasSceneResource(resource, archive)) return;
+				++materials;
+				const auto frames = assets.spriteFrameCount(resource, archive);
+				for (std::size_t frame = 0; frame < frames; ++frame) {
+					const auto image = assets.spriteTexture(resource, frame, archive);
+					if (!image->width || !image->height)
+						throw std::runtime_error("Empty portrait frame: " + resource);
+					const auto relative = side / category / fs::path(resource).stem() /
+						("frame-" + std::to_string(frame) + ".png");
+					save(relative, resource, std::to_string(frame), 0, 0,
+						image->originX, image->originY, *image);
+				}
+			};
+			// Roster::load has 24 portraits; NPC portrait IDs extend to 66.
+			// Do not probe arbitrary names: CC's 16-bit hashes can collide.
+			for (unsigned id = 1; id <= 24; ++id)
+				exportPortrait("char" + std::string(id < 10 ? "0" : "") + std::to_string(id) + ".fac", "party");
+			for (unsigned id = 1; id <= 66; ++id)
+				exportPortrait("face" + std::string(id < 10 ? "0" : "") + std::to_string(id) + ".fac", "npc");
+			exportPortrait("dse.fac", "conditions");
+			exportPortrait("frame.fac", "borders");
+			continue;
+		}
 		for (const char *theme : {"town", "cave", "towr", "cstl", "dung", "scfi"}) {
 			for (bool ceiling : {false, true}) {
 				const std::string resource = std::string(theme) + (ceiling ? ".sky" : ".gnd");
@@ -166,15 +191,17 @@ void extract(const fs::path &game, const fs::path &output) {
 		}
 	}
 	manifest.close();
-	if (!manifest) throw std::runtime_error("Cannot write tile manifest");
+	if (!manifest) throw std::runtime_error("Cannot write artwork manifest");
 	std::cout << "Exported " << count << " PNGs from " << materials << " materials to " << output << '\n';
 }
 } // namespace
 
 int main(int argc, char **argv) {
 	try {
-		if (argc != 3) throw std::invalid_argument("Usage: mmodern_extract_tiles <game-directory> <new-output-directory>");
-		extract(fs::u8path(argv[1]), fs::u8path(argv[2]));
+		const bool portraits = argc == 4 && std::string(argv[3]) == "--portraits";
+		if (argc != 3 && !portraits)
+			throw std::invalid_argument("Usage: mmodern_extract_tiles <game-directory> <new-output-directory> [--portraits]");
+		extract(fs::u8path(argv[1]), fs::u8path(argv[2]), portraits);
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << "Tile extraction failed: " << error.what() << '\n';
