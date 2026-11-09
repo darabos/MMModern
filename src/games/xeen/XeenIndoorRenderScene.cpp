@@ -45,12 +45,12 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		return IndoorVertex{right, height - eyeHeight, -forward, u, v};
 	};
 	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices,
-			bool foreground = false) {
+			bool allowBehindParty = false) {
 		if (!image->width || !image->height) return;
-		// The virtual eye is behind the party. Keep environment geometry
-		// clipped at the party while allowing grounded foreground objects closer.
+		// Keep walls clipped at the party, but let horizontal surfaces and
+		// grounded objects extend toward the virtual eye behind it.
 		constexpr float clipZ = -0.04f;
-		if (foreground || std::all_of(vertices.begin(), vertices.end(),
+		if (allowBehindParty || std::all_of(vertices.begin(), vertices.end(),
 				[&](const auto &v) { return v.z <= clipZ; })) {
 			scene->quads.push_back({std::move(image), vertices});
 			return;
@@ -96,11 +96,11 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		if (!cell) continue;
 		const float l = x - 0.5f, r = x + 0.5f, s = y - 0.5f, n = y + 0.5f;
 		add(ground, {vertex(l, s, 0, 0, 1), vertex(r, s, 0, 1, 1),
-			vertex(r, n, 0, 1, 0), vertex(l, n, 0, 0, 0)});
+			vertex(r, n, 0, 1, 0), vertex(l, n, 0, 0, 0)}, true);
 		if (cell->cell->flags & 8) {
 			add(texture(prefix + ".sky", 0, resources.sky),
 				{vertex(l, n, wallHeight, 0, 0), vertex(r, n, wallHeight, 1, 0),
-				 vertex(r, s, wallHeight, 1, 1), vertex(l, s, wallHeight, 0, 1)});
+				 vertex(r, s, wallHeight, 1, 1), vertex(l, s, wallHeight, 0, 1)}, true);
 		}
 		for (unsigned face = 0; face < 4; ++face) {
 			const auto direction = static_cast<XeenDirection>(face);
