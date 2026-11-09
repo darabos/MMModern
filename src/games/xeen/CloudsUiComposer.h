@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace mmodern {
+struct UiRenderScene;
 
 class XeenAssetSource;
 struct XeenCharacterRulesContext;
@@ -56,7 +57,8 @@ public:
 	// Replace the already composed main-screen controls with ICONS_COMBAT.
 	void drawCombatButtons(XeenAssetSource &assets,IndexedFrame &frame,XeenSceneArchive archive=XeenSceneArchive::Current) const;
 	void drawInterface(XeenAssetSource &assets,const XeenPartyState &partyState,
-		const XeenCharacterRulesContext &context,XeenSceneArchive archive=XeenSceneArchive::Current) const;
+		const XeenCharacterRulesContext &context,XeenSceneArchive archive=XeenSceneArchive::Current,
+		UiRenderScene *ui = nullptr) const;
 	IndexedFrame compose(XeenAssetSource &assets, const XeenPartyState &partyState,
 		const XeenCharacterRulesContext &context) const;
 };

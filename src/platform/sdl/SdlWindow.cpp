@@ -309,6 +309,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 			corrected ? PictureAspect::FourThree : PictureAspect::Square);
     };
 	std::uint64_t lastPresentationStart = 0;
+	bool cursorDirty = false;
     const auto present = [&] {
 		std::optional<std::pair<int, int>> cursor;
 		if (resources.cursorHidden && SDL_GetMouseFocus() == window &&
@@ -317,6 +318,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		}
 		lastPresentationStart = SdlWindow::presentationNanoseconds();
 		gpu.present(cursor);
+		cursorDirty = false;
     };
     // Borderless desktop fullscreen keeps the display mode. The active
     // presentation path re-centers the picture and maps the mouse.
@@ -503,6 +505,10 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
     };
     const auto dispatchEvent = [&](const SDL_Event &event, const std::optional<std::uint64_t> &batchInput,
             const IndexedFrame::Presentation &batchFrame, const InputContext &batchContext) {
+        if (event.type == SDL_MOUSEMOTION) {
+            if (event.motion.windowID == SDL_GetWindowID(window)) cursorDirty = true;
+            return;
+        }
         if(event.type==SDL_RENDER_TARGETS_RESET || event.type==SDL_RENDER_DEVICE_RESET) {
 			// This loop no longer owns an SDL renderer or its reset notifications.
             return;
@@ -803,11 +809,19 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         for (;;) {
             const auto now = SdlWindow::presentationNanoseconds();
             const auto nextFrame = PresentationClock::checkedAdd(lastPresentationStart, 16666667);
-            const bool cosmetic = gpu.animating() && nextFrame < semanticWake;
+            const bool cosmetic = (gpu.animating() || cursorDirty) && nextFrame < semanticWake;
             const auto wake = cosmetic ? nextFrame : semanticWake;
             const int remaining = now >= wake ? 0 :
                 int(PresentationClock::ceilMilliseconds(wake - now));
             receivedEvent = SDL_WaitEventTimeout(&event, remaining);
+            if (receivedEvent && event.type == SDL_MOUSEMOTION &&
+                    event.motion.windowID == SDL_GetWindowID(window)) {
+                cursorDirty = true;
+                receivedEvent = false;
+                if (SdlWindow::presentationNanoseconds() >= semanticWake) break;
+                if (cosmetic && SdlWindow::presentationNanoseconds() >= nextFrame) present();
+                continue;
+            }
             if (receivedEvent || !cosmetic || SdlWindow::presentationNanoseconds() >= semanticWake) break;
             present();
         }

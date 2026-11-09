@@ -5,6 +5,7 @@
 #include "core/GameInstallation.h"
 #include "core/IndexedFrame.h"
 #include "core/IndoorRenderScene.h"
+#include "core/UiRenderScene.h"
 #include "formats/xeen/XeenSpriteDrawOptions.h"
 #include "formats/xeen/XeenMonsterAppearance.h"
 #include "formats/xeen/XeenDosText.h"
@@ -38,6 +39,10 @@ public:
 		const XeenSpriteDrawOptions &options);
 	IndexedFrame snapshot() const;
 	std::shared_ptr<const IndoorTexture> spriteTexture(const std::string &, std::size_t, XeenSceneArchive);
+	std::shared_ptr<const IndoorTexture> backgroundTexture(XeenSceneArchive);
+	void appendUiSprite(UiRenderScene &, const std::string &, std::size_t, int x, int y,
+		XeenSceneArchive, int left = 0, int top = 0, int right = 320, int bottom = 200);
+	static void paintUiQuad(IndexedFrame &, const UiQuad &);
 	void beginInterfaceCoverage();
 	std::vector<std::uint8_t> endInterfaceCoverage();
  void blackenScene();

@@ -61,10 +61,14 @@ void CloudsMapComposer::drawIndoorCommands(XeenAssetSource &assets,
 
 void CloudsMapComposer::drawInterfaceLayers(XeenAssetSource &assets,
 		const XeenPartyState &partyState,
-		const XeenCharacterRulesContext &context,XeenScenePresentation *presentation,XeenSceneArchive archive) const {
-    CloudsUiComposer::drawBorder(partyState,[&](const char *name,unsigned frame,int x,int y){XeenSpriteDrawOptions options;options.archive=archive;assets.drawSprite(name,frame,x,y,options);},presentation);
+		const XeenCharacterRulesContext &context,XeenScenePresentation *presentation,XeenSceneArchive archive,
+		UiRenderScene *ui) const {
+    CloudsUiComposer::drawBorder(partyState,[&](const char *name,unsigned frame,int x,int y){
+		if (ui) assets.appendUiSprite(*ui,name,frame,x,y,archive);
+		else {XeenSpriteDrawOptions options;options.archive=archive;assets.drawSprite(name,frame,x,y,options);}
+	},presentation);
 	// The compass/main button at y=137 overlaps the scene border in the original UI.
-	CloudsUiComposer().drawInterface(assets,partyState,context,archive);
+	CloudsUiComposer().drawInterface(assets,partyState,context,archive,ui);
 }
 
 IndexedFrame CloudsMapComposer::drawDirectionSense(XeenAssetSource &assets,IndexedFrame frame,
@@ -135,32 +139,66 @@ IndexedFrame CloudsMapComposer::compose(XeenAssetSource &assets,
  // Obscure after scene/monsters, before overlapping border indicators.
  const bool black = world.sceneIsBlack(partyState,camera);
  if(black)assets.blackenScene();
-	if (indoorScene) assets.beginInterfaceCoverage();
-	drawInterfaceLayers(assets, partyState, context,&world.scenePresentation(),archive);
-	if (indoorScene) {
-		const auto coverage = assets.endInterfaceCoverage();
-		for (std::size_t i = 0; i < coverage.size(); ++i)
-			indoorScene->interfaceCoverage[i] |= coverage[i];
-		indoorScene->black = black;
-	}
+	auto ui = std::make_shared<UiRenderScene>();
+	auto base = assets.snapshot();
+	ui->basePixels = base.pixels;
+	if (indoorScene) ui->effectCoverage = indoorScene->interfaceCoverage;
+	const auto background = assets.backgroundTexture(archive);
+	ui->quads = {{background,0,0,0,0,320,8}, {background,0,0,0,140,320,200},
+		{background,0,0,0,8,8,140}, {background,0,0,224,8,320,140}};
+	drawInterfaceLayers(assets, partyState, context,&world.scenePresentation(),archive,ui.get());
+	for (const auto &quad : ui->quads) XeenAssetSource::paintUiQuad(base, quad);
+	if (indoorScene) indoorScene->black = black;
     if(partyState.encounterContext)for(auto i:{XeenPartyEffect::Levitate,XeenPartyEffect::Bless,XeenPartyEffect::PowerShield,XeenPartyEffect::HolyBonus,XeenPartyEffect::Heroism})
         emittedAnimation=emittedAnimation || partyState.encounterContext->effects[i]!=0;
 	const auto &indicators=world.scenePresentation();
 	emittedAnimation=emittedAnimation || (indicators.thinWall && xeenPartyHasSkill(partyState,16)) ||
 		(indicators.dangerSense && xeenPartyHasSkill(partyState,17));
-	auto result = drawXeenMinimap(world,camera,drawDirectionSense(assets,assets.snapshot(),partyState,camera,indicators),
-        partyState.encounterContext && partyState.encounterContext->effects[XeenPartyEffect::AutomapOn]!=0,
-        [&](IndexedFrame &frame,const char *name,unsigned index,int x,int y) {
-            assets.drawDialogSprite(frame,name,index,x,y,xeenDialogSpriteArchive(camera.mapId,name));
-        },ordinaryPhase.value_or(0),
-        partyState.encounterContext && partyState.encounterContext->effects[XeenPartyEffect::WizardEye]!=0);
+	auto result = drawDirectionSense(assets,base,partyState,camera,indicators);
+	// Direction Sense remains software text, represented by a small transparent
+	// texture until the text renderer itself migrates.
+	int left = 320, top = 200, right = 0, bottom = 0;
+	for (int y = 0; y < 200; ++y) for (int x = 0; x < 320; ++x)
+		if (result.pixels[y*320+x] != base.pixels[y*320+x]) {
+			left = std::min(left,x); top = std::min(top,y);
+			right = std::max(right,x+1); bottom = std::max(bottom,y+1);
+		}
+	if (left < right && top < bottom) {
+		auto letter = std::make_shared<IndoorTexture>();
+		letter->width = right-left; letter->height = bottom-top;
+		for (int y = top; y < bottom; ++y) for (int x = left; x < right; ++x) {
+			letter->indices.push_back(result.pixels[y*320+x]);
+			letter->alpha.push_back(result.pixels[y*320+x] != base.pixels[y*320+x] ? 255 : 0);
+		}
+		ui->quads.push_back({std::move(letter),left,top});
+	}
+	const auto minimap = xeenMinimapCommands(world,camera,
+		partyState.encounterContext && partyState.encounterContext->effects[XeenPartyEffect::AutomapOn]!=0,
+		ordinaryPhase.value_or(0),
+		partyState.encounterContext && partyState.encounterContext->effects[XeenPartyEffect::WizardEye]!=0);
+	for (const auto &command : minimap) {
+		const auto previous = ui->quads.size();
+		assets.appendUiSprite(*ui,command.resource,command.frame,command.x,command.y,
+			xeenDialogSpriteArchive(camera.mapId,command.resource.c_str()),
+			command.clip.left,command.clip.top,command.clip.right,command.clip.bottom);
+		if (ui->quads.size() != previous) XeenAssetSource::paintUiQuad(result,ui->quads.back());
+	}
 	if (containsOrdinaryAnimation) *containsOrdinaryAnimation = emittedAnimation;
 	if (indoorScene) {
+		for (const auto &quad : ui->quads) {
+			const auto &t = *quad.texture;
+			for (int y = std::max({0,quad.y,quad.top}); y < std::min({200,quad.bottom,quad.y+t.height}); ++y)
+				for (int x = std::max({0,quad.x,quad.left}); x < std::min({320,quad.right,quad.x+t.width}); ++x)
+					if (t.alpha[std::size_t(y-quad.y)*t.width+x-quad.x])
+						indoorScene->interfaceCoverage[y*320+x] = 1;
+		}
 		indoorScene->originalPixels = result.pixels;
 		// Direction Sense occupies the last row of the scene.
 		std::fill_n(indoorScene->interfaceCoverage.begin() + 139 * 320, 320, 1);
 		result.indoorScene = std::move(indoorScene);
 	}
+	ui->referencePixels = result.pixels;
+	result.uiScene = std::move(ui);
 	return result;
 }
 

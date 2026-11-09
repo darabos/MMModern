@@ -16,6 +16,7 @@ class XeenWorld;
 struct XeenCharacterRulesContext;
 struct XeenPartyState;
 class XeenScenePresentation;
+struct UiRenderScene;
 
 class CloudsMapComposer {
 public:
@@ -39,7 +40,8 @@ public:
 	// Complete a scene replay through the same production border/UI layers.
 	void drawInterfaceLayers(XeenAssetSource &assets,
 		const XeenPartyState &partyState,
-		const XeenCharacterRulesContext &context,XeenScenePresentation *presentation=nullptr,XeenSceneArchive archive=XeenSceneArchive::Current) const;
+		const XeenCharacterRulesContext &context,XeenScenePresentation *presentation=nullptr,
+		XeenSceneArchive archive=XeenSceneArchive::Current, UiRenderScene *ui=nullptr) const;
 	// Direction Sense's facing letter, written after the border layers.
 	IndexedFrame drawDirectionSense(XeenAssetSource &assets,IndexedFrame frame,
 		const XeenPartyState &partyState,const XeenCamera &camera,const XeenScenePresentation &presentation) const;

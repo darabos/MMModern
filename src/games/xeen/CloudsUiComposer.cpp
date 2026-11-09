@@ -48,6 +48,24 @@ void CloudsUiComposer::drawCombatButtons(XeenAssetSource &assets,IndexedFrame &f
     // attributed to the ScummVM developers listed in upstream COPYRIGHT.
     if (!frame.isValid() || frame.width!=320 || frame.height!=200)
         throw std::runtime_error("Invalid combat interface framebuffer");
+	if (frame.uiScene) {
+		auto ui = std::make_shared<UiRenderScene>(*frame.uiScene);
+		auto reference = frame;
+		reference.pixels = ui->basePixels;
+		for (const auto &placement : kInterfaceButtons) {
+			ui->quads.erase(std::remove_if(ui->quads.begin(),ui->quads.end(),[&](const auto &q) {
+				return q.resource=="combat.icn" && q.anchorX==placement.x && q.anchorY==placement.y;
+			}),ui->quads.end());
+			const auto previous = ui->quads.size();
+			assets.appendUiSprite(*ui, "combat.icn", placement.frame, placement.x, placement.y, archive);
+			if (previous == ui->quads.size()) continue;
+			XeenAssetSource::paintUiQuad(frame,ui->quads.back());
+		}
+		for (const auto &quad:ui->quads) XeenAssetSource::paintUiQuad(reference,quad);
+		ui->referencePixels = std::move(reference.pixels);
+		frame.uiScene = std::move(ui);
+		return;
+	}
     for (const auto &placement : kInterfaceButtons)
         assets.drawSprite("combat.icn",placement.frame,placement.x,placement.y,options);
     const auto buttons=assets.snapshot();
@@ -70,22 +88,23 @@ void CloudsUiComposer::loadBackground(XeenAssetSource &assets,XeenSceneArchive a
 
 void CloudsUiComposer::drawInterface(XeenAssetSource &assets,
 		const XeenPartyState &partyState,
-		const XeenCharacterRulesContext &context,XeenSceneArchive archive) const {
+		const XeenCharacterRulesContext &context,XeenSceneArchive archive, UiRenderScene *ui) const {
 	XeenSpriteDrawOptions options;options.archive=archive;
+	const auto draw = [&](const std::string &name, std::size_t frame, int x, int y) {
+		if (ui) assets.appendUiSprite(*ui, name, frame, x, y, archive);
+		else assets.drawSprite(name, frame, x, y, options);
+	};
 	// PartyDrawer::drawParty() restores all six slots before drawing active faces.
-	assets.drawSprite("restorex.icn",0,8,149,options);
+	draw("restorex.icn",0,8,149);
 	for (const PortraitPlacement &placement : buildPortraitPlacements(partyState)) {
-		assets.drawSprite(placement.resourceName, placement.frame,
-			placement.x,placement.y,options);
+		draw(placement.resourceName, placement.frame, placement.x,placement.y);
 	}
 	// The original draws every face first, then the classic HP indicator pass.
 	for (const HpPlacement &placement : buildHpPlacements(partyState, context)) {
-		assets.drawSprite("hpbars.icn", placement.frame,
-			placement.x,placement.y,options);
+		draw("hpbars.icn", placement.frame, placement.x,placement.y);
 	}
 	for (const SpritePlacement &placement : kInterfaceButtons) {
-		assets.drawSprite(placement.resourceName, placement.frame,
-			placement.x,placement.y,options);
+		draw(placement.resourceName, placement.frame, placement.x,placement.y);
 	}
 }
 

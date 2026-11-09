@@ -15,7 +15,7 @@ public:
 	~IndoorGpuRenderer();
 	IndoorGpuRenderer(const IndoorGpuRenderer &) = delete;
 	IndoorGpuRenderer &operator=(const IndoorGpuRenderer &) = delete;
-	void upload(const IndexedFrame &, bool modern, bool allowWorld = true);
+	void upload(const IndexedFrame &, bool modern, bool allowGameplayLayers = true);
 	void cursor(const IndexedFrame &);
 	void present(std::optional<std::pair<int, int>> cursorPosition);
 	bool animating() const;

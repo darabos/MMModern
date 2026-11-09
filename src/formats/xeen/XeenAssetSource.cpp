@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstdio>
+#include <map>
 
 namespace mmodern {
 
@@ -13,6 +14,7 @@ struct XeenAssetSource::Impl {
 	ScummVmXeenBridge bridge;
  GameInstallation installation;
  std::unique_ptr<XeenDosText> text;
+ std::map<XeenSceneArchive,std::shared_ptr<const IndoorTexture>> backgrounds;
 
 	explicit Impl(const GameInstallation &source) : bridge(source),installation(source) {}
 
@@ -36,6 +38,43 @@ XeenAssetSource::~XeenAssetSource() = default;
 std::shared_ptr<const IndoorTexture> XeenAssetSource::spriteTexture(
 		const std::string &name, std::size_t frame, XeenSceneArchive archive) {
 	return _impl->bridge.spriteTexture(name, frame, archive);
+}
+std::shared_ptr<const IndoorTexture> XeenAssetSource::backgroundTexture(XeenSceneArchive archive) {
+	const auto found = _impl->backgrounds.find(archive);
+	if (found != _impl->backgrounds.end()) return found->second;
+	auto texture = std::make_shared<IndoorTexture>();
+	texture->width = 320; texture->height = 200;
+	texture->indices = readArchiveResource("back.raw", archive);
+	if (texture->indices.size() != 320 * 200) throw std::runtime_error("Invalid HUD background dimensions");
+	texture->alpha.assign(texture->indices.size(), 255);
+	_impl->backgrounds.emplace(archive, texture);
+	return texture;
+}
+void XeenAssetSource::appendUiSprite(UiRenderScene &scene, const std::string &name,
+		std::size_t frame, int x, int y, XeenSceneArchive archive,
+		int left, int top, int right, int bottom) {
+	auto texture = spriteTexture(name, frame, archive);
+	if (!texture->width || !texture->height) return;
+	scene.quads.push_back({texture, x + texture->originX, y + texture->originY, left, top, right, bottom,name,x,y});
+}
+namespace {
+void paintUiPixels(std::vector<std::uint8_t> &pixels, int width, int height, const UiQuad &quad) {
+	if (width <= 0 || height <= 0 || pixels.size()!=std::size_t(width)*height || !quad.texture)
+		throw std::invalid_argument("Invalid HUD quad target");
+	const auto &t = *quad.texture;
+	if (t.width < 0 || t.height < 0 || t.indices.size() != std::size_t(t.width) * t.height ||
+			t.alpha.size() != t.indices.size()) throw std::invalid_argument("Invalid HUD quad texture");
+	const int left = std::max({0, quad.left, quad.x}), top = std::max({0, quad.top, quad.y});
+	const int right = std::min({width, quad.right, quad.x + t.width});
+	const int bottom = std::min({height, quad.bottom, quad.y + t.height});
+	for (int y = top; y < bottom; ++y) for (int x = left; x < right; ++x) {
+		const auto source = std::size_t(y - quad.y) * t.width + x - quad.x;
+		if (t.alpha[source]) pixels[std::size_t(y) * width + x] = t.indices[source];
+	}
+}
+}
+void XeenAssetSource::paintUiQuad(IndexedFrame &frame, const UiQuad &quad) {
+	paintUiPixels(frame.pixels,frame.width,frame.height,quad);
 }
 void XeenAssetSource::beginInterfaceCoverage() { _impl->bridge.beginInterfaceCoverage(); }
 std::vector<std::uint8_t> XeenAssetSource::endInterfaceCoverage() {
@@ -239,6 +278,26 @@ void XeenAssetSource::drawNpc(IndexedFrame &frame, std::uint8_t portraitId,
 }
 
 void XeenAssetSource::drawDialogSprite(IndexedFrame &frame,const char *name,unsigned index,int x,int y,XeenSceneArchive selection,int scale,unsigned flags) {
+	const std::string resource(name);
+	const bool hud = resource=="main.icn" || resource=="combat.icn" || resource=="restorex.icn" ||
+		resource=="hpbars.icn" || resource=="global.icn" || resource=="border.icn" ||
+		resource=="charpow.icn" || resource=="spellfx.icn" || resource=="bless.icn" ||
+		resource=="fecp.brd" || (resource.size()>=4 && resource.compare(resource.size()-4,4,".fac")==0);
+	if (frame.uiScene && hud && scale==0 && flags==0 && !xeenProgramArchive(selection)) {
+		auto ui=std::make_shared<UiRenderScene>(*frame.uiScene);
+		ui->quads.erase(std::remove_if(ui->quads.begin(),ui->quads.end(),[&](const auto &q) {
+			return q.resource==resource && q.anchorX==x && q.anchorY==y;
+		}),ui->quads.end());
+		const auto previous=ui->quads.size();
+		appendUiSprite(*ui,resource,index,x,y,selection);
+		if (previous!=ui->quads.size())
+			paintUiQuad(frame,ui->quads.back());
+		ui->referencePixels=ui->basePixels;
+		for(const auto &quad:ui->quads)
+			paintUiPixels(ui->referencePixels,frame.width,frame.height,quad);
+		frame.uiScene=std::move(ui);
+		return;
+	}
 	_impl->bridge.drawDialogSprite(frame,name,index,x,y,selection,scale,flags);
 }
 

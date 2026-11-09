@@ -2,6 +2,7 @@
 #include "platform/sdl/SdlWindowPlacement.h"
 #include "platform/sdl/IndoorCameraSpring.h"
 #include "core/IndoorRenderScene.h"
+#include "core/UiRenderScene.h"
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -137,6 +138,16 @@ struct IndoorGpuRenderer::Impl {
 	bgfx::VertexBufferHandle rectangleVertices = BGFX_INVALID_HANDLE;
 	bgfx::IndexBufferHandle rectangleIndices = BGFX_INVALID_HANDLE;
 	bgfx::TextureHandle frameTexture = BGFX_INVALID_HANDLE, cursorTexture = BGFX_INVALID_HANDLE;
+	bgfx::TextureHandle overlayTexture = BGFX_INVALID_HANDLE;
+	bgfx::VertexBufferHandle uiVertices = BGFX_INVALID_HANDLE;
+	struct UiDraw {
+		std::shared_ptr<const IndoorTexture> texture;
+		bgfx::TextureHandle image = BGFX_INVALID_HANDLE;
+		std::uint32_t first = 0, count = 0;
+	};
+	std::vector<UiDraw> uiDraws;
+	std::shared_ptr<const UiRenderScene> uiScene;
+	bool gpuHud = false;
 	bgfx::FrameBufferHandle worldTarget = BGFX_INVALID_HANDLE, compositionTarget = BGFX_INVALID_HANDLE;
 	int cursorWidth = 0, cursorHeight = 0;
 	IndexedFrame frame;
@@ -179,6 +190,7 @@ struct IndoorGpuRenderer::Impl {
 		if (!initialized) return;
 		batches.clear();
 		releaseHandle(rectangleVertices); releaseHandle(rectangleIndices);
+		releaseHandle(uiVertices); releaseHandle(overlayTexture);
 		for (auto &entry : textures) releaseHandle(entry.second.handle);
 		releaseHandle(worldTarget); releaseHandle(compositionTarget);
 		releaseHandle(frameTexture); releaseHandle(cursorTexture);
@@ -393,7 +405,41 @@ struct IndoorGpuRenderer::Impl {
 		}
 	}
 
-	void updateFrame(const IndexedFrame &supplied, bool modern, bool allowWorld) {
+	void prepareUi(const std::shared_ptr<const UiRenderScene> &scene) {
+		if (uiScene == scene) return;
+		if (uiScene && uiScene->quads.size() == scene->quads.size() &&
+				std::equal(uiScene->quads.begin(),uiScene->quads.end(),scene->quads.begin(),[](const auto &a,const auto &b) {
+					return a.texture==b.texture && a.x==b.x && a.y==b.y && a.left==b.left &&
+						a.top==b.top && a.right==b.right && a.bottom==b.bottom;
+				})) { uiScene=scene; return; }
+		std::vector<MeshVertex> vertices;
+		std::vector<UiDraw> draws;
+		for (const auto &quad : scene->quads) {
+			if (!quad.texture || quad.texture->width <= 0 || quad.texture->height <= 0)
+				throw std::invalid_argument("Invalid GPU HUD texture");
+			const auto &t = *quad.texture;
+			const int left = std::max({0,quad.left,quad.x}), top = std::max({0,quad.top,quad.y});
+			const int right = std::min({frameWidth,quad.right,quad.x+t.width});
+			const int bottom = std::min({frameHeight,quad.bottom,quad.y+t.height});
+			if (left >= right || top >= bottom) continue;
+			const auto vertex = [&](int x,int y) {
+				return MeshVertex{float(x),float(y),0,float(x-quad.x)/t.width,float(y-quad.y)/t.height,0,0,0,0};
+			};
+			if (draws.empty() || draws.back().texture != quad.texture)
+				draws.push_back({quad.texture,BGFX_INVALID_HANDLE,std::uint32_t(vertices.size()),0});
+			vertices.insert(vertices.end(),{vertex(left,bottom),vertex(right,bottom),vertex(right,top),
+				vertex(left,bottom),vertex(right,top),vertex(left,top)});
+			draws.back().count += 6;
+		}
+		bgfx::VertexBufferHandle buffer = BGFX_INVALID_HANDLE;
+		if (!vertices.empty())
+			buffer = require(bgfx::createVertexBuffer(bgfx::copy(vertices.data(),
+				std::uint32_t(vertices.size()*sizeof(MeshVertex))),layout),"Cannot create GPU HUD geometry");
+		releaseHandle(uiVertices);
+		uiVertices = buffer; uiDraws = std::move(draws); uiScene = scene;
+	}
+
+	void updateFrame(const IndexedFrame &supplied, bool modern, bool allowGameplayLayers) {
 		if (!supplied.isValid() || supplied.width != frameWidth || supplied.height != frameHeight)
 			throw std::invalid_argument("Invalid bgfx framebuffer or changed dimensions");
 		advanceCamera();
@@ -403,36 +449,56 @@ struct IndoorGpuRenderer::Impl {
 			cameraContinuity = scene.cameraContinuity;
 		}
 		modernEnabled = modern;
-		enhanced = modern && allowWorld && bool(supplied.indoorScene);
+		enhanced = modern && allowGameplayLayers && bool(supplied.indoorScene);
+		gpuHud = allowGameplayLayers && bool(supplied.uiScene);
+		if (gpuHud && (supplied.uiScene->basePixels.size()!=supplied.pixels.size() ||
+				supplied.uiScene->referencePixels.size()!=supplied.pixels.size() ||
+				(enhanced && supplied.uiScene->effectCoverage.size()!=supplied.pixels.size())))
+			throw std::invalid_argument("Invalid GPU HUD framebuffer layers");
 		if (enhanced && (frameWidth != 320 || frameHeight != 200 ||
 				supplied.indoorScene->originalPixels.size() != supplied.pixels.size() ||
 				supplied.indoorScene->interfaceCoverage.size() != supplied.pixels.size()))
 			throw std::invalid_argument("Invalid indoor scene overlay coverage");
-		if (enhanced) {
-			prepareScene(supplied.indoorScene);
+		if (enhanced) prepareScene(supplied.indoorScene);
+		if (gpuHud) prepareUi(supplied.uiScene);
+		if (enhanced || gpuHud) {
 			for (auto it = textures.begin(); it != textures.end();) {
 				if (it->second.source.expired() || palette != supplied.palette) {
 					releaseHandle(it->second.handle); it = textures.erase(it);
 				} else ++it;
 			}
 			palette = supplied.palette;
-			for (auto &batch : batches) batch.image = uploadTexture(batch.texture);
+			if (enhanced) for (auto &batch : batches) batch.image = uploadTexture(batch.texture);
+			if (gpuHud) for (auto &draw : uiDraws) draw.image = uploadTexture(draw.texture);
 		}
 		std::vector<std::uint8_t> rgba(supplied.pixels.size() * 4);
+		std::vector<std::uint8_t> overlay;
+		if (gpuHud) overlay.resize(rgba.size());
 		for (std::size_t i = 0; i < supplied.pixels.size(); ++i) {
-			const auto p = std::size_t(supplied.pixels[i]) * 3;
+			const auto p = std::size_t(gpuHud ? supplied.uiScene->basePixels[i] : supplied.pixels[i]) * 3;
 			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = supplied.palette[p + c];
 			bool transparent = false;
 			if (enhanced) {
 				const auto &scene = *supplied.indoorScene;
 				const auto x = i % frameWidth, y = i / frameWidth;
 				transparent = x >= 8 && x < 224 && y >= 8 && y < 140 &&
-					!scene.interfaceCoverage[i] && supplied.pixels[i] == scene.originalPixels[i];
+					(gpuHud ? !supplied.uiScene->effectCoverage[i] :
+						!scene.interfaceCoverage[i] && supplied.pixels[i] == scene.originalPixels[i]);
 			}
 			rgba[i * 4 + 3] = transparent ? 0 : 255;
+			if (gpuHud) {
+				const auto color = std::size_t(supplied.pixels[i])*3;
+				for (unsigned c=0;c<3;++c) overlay[i*4+c]=supplied.palette[color+c];
+				overlay[i*4+3]=supplied.pixels[i]!=supplied.uiScene->referencePixels[i] ? 255 : 0;
+			}
 		}
 		bgfx::updateTexture2D(frameTexture, 0, 0, 0, 0, std::uint16_t(frameWidth), std::uint16_t(frameHeight),
 			bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+		if (gpuHud) {
+			if (!bgfx::isValid(overlayTexture)) overlayTexture=createTexture(frameWidth,frameHeight);
+			bgfx::updateTexture2D(overlayTexture,0,0,0,0,std::uint16_t(frameWidth),std::uint16_t(frameHeight),
+				bgfx::copy(overlay.data(),std::uint32_t(overlay.size())));
+		}
 		frame = supplied;
 	}
 
@@ -540,6 +606,21 @@ struct IndoorGpuRenderer::Impl {
 		bgfx::setViewTransform(compositionView, nullptr, compositionProjection.data());
 		if (enhanced) rectangle(compositionView, bgfx::getTexture(worldTarget), 8, 8, 216, 132, true);
 		rectangle(compositionView, frameTexture, 0, 0, float(frameWidth), float(frameHeight), false, true);
+		if (gpuHud) {
+			std::array<float,16> identity{};
+			identity[0]=identity[5]=identity[10]=identity[15]=1;
+			const std::array<float,4> options{};
+			for (const auto &draw : uiDraws) {
+				bgfx::setTransform(identity.data());
+				bgfx::setUniform(distanceWarp,options.data());
+				bgfx::setUniform(geometry,options.data());
+				bgfx::setVertexBuffer(0,uiVertices,draw.first,draw.count);
+				bgfx::setTexture(0,sampler,draw.image,std::uint32_t(pointSampling));
+				bgfx::setState(colorWrite | BGFX_STATE_BLEND_ALPHA);
+				bgfx::submit(compositionView,program);
+			}
+			rectangle(compositionView,overlayTexture,0,0,float(frameWidth),float(frameHeight),false,true);
+		}
 		if (cursorPosition && bgfx::isValid(cursorTexture))
 			rectangle(compositionView, cursorTexture, float(cursorPosition->first), float(cursorPosition->second),
 				float(cursorWidth), float(cursorHeight), false, true);
@@ -560,8 +641,8 @@ IndoorGpuRenderer::IndoorGpuRenderer(SDL_Window *window, int width, int height, 
 	_impl->initialize();
 }
 IndoorGpuRenderer::~IndoorGpuRenderer() = default;
-void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowWorld) {
-	_impl->updateFrame(frame, modern, allowWorld);
+void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowGameplayLayers) {
+	_impl->updateFrame(frame, modern, allowGameplayLayers);
 }
 bool IndoorGpuRenderer::animating() const { return _impl->modernEnabled && _impl->camera.moving(); }
 void IndoorGpuRenderer::present(std::optional<std::pair<int, int>> cursorPosition) { _impl->present(cursorPosition); }
