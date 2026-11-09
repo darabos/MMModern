@@ -237,6 +237,11 @@ target_link_libraries(mmodern PRIVATE
 	SDL2::SDL2
 )
 
+add_executable(mmodern_extract_tiles EXCLUDE_FROM_ALL tools/ExtractXeenTiles.cpp)
+target_link_libraries(mmodern_extract_tiles PRIVATE mmodern_xeen mmodern_scummvm_xeen ZLIB::ZLIB)
+target_compile_definitions(mmodern_extract_tiles PRIVATE
+	MMODERN_REPOSITORY_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+
 if(MINGW)
 	target_compile_options(mmodern PRIVATE -Wall -Wextra -Wpedantic)
 	target_link_options(mmodern PRIVATE -static-libgcc -static-libstdc++ -Wl,--gc-sections)
