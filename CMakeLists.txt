@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(MMModern VERSION 0.18.0 LANGUAGES CXX)
 
@@ -23,6 +23,7 @@ set(MMODERN_RU_DATA_DIR "" CACHE PATH "Optional Russian World of Xeen translatio
 
 find_package(SDL2 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+include(cmake/MMModernBgfx.cmake)
 add_library(mmodern_platform_libs INTERFACE)
 if(WIN32)
  target_link_libraries(mmodern_platform_libs INTERFACE shell32 ole32 uuid bcrypt winmm gdi32 winspool sapi)
@@ -178,6 +179,9 @@ add_library(mmodern_platform_sdl STATIC
 	src/platform/sdl/SdlWindowPlacement.cpp
 )
 target_link_libraries(mmodern_platform_sdl PUBLIC mmodern_core PRIVATE SDL2::SDL2 mmodern_platform_libs mmodern_platform_files)
+target_link_libraries(mmodern_platform_sdl PRIVATE bgfx)
+target_include_directories(mmodern_platform_sdl PRIVATE "${MMODERN_SHADER_OUTPUT}")
+add_dependencies(mmodern_platform_sdl mmodern_bgfx_shaders)
 
 add_library(mmodern_app STATIC
  src/app/XeenSetupScreen.cpp

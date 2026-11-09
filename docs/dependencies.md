@@ -7,6 +7,49 @@ Common, Graphics, and Image libraries from a separately configured ScummVM
 build. Audio does not instantiate ScummVM's mixer or OSystem; `g_system`
 remains null.
 
+## bgfx rendering
+
+The experimental fork uses bgfx for window presentation and indoor 3D rendering.
+SDL2 still owns windowing, input and audio. The selected graphics backends are
+Metal on macOS, Direct3D 11 on Windows and Vulkan on Linux; backend fallback is
+disabled because each build embeds shaders for its selected backend.
+
+[MMModernBgfx.cmake](../cmake/MMModernBgfx.cmake) fetches
+`https://github.com/bkaradzic/bgfx.cmake.git` at
+`655364897f1cde0ada1f9486e771c1de8b5bf4cd`. That build wrapper pins:
+
+- bgfx: `a4f43eb7f671dc8f1f0443050c28f5eb14661983`
+- bx: `ff68113202c71fa99a67831036500b2270ce313d`
+- bimg: `388a5e637c63e472158c940317c68c735bca4795`
+
+CMake 3.21 or newer and Git are required. The first configuration fetches these
+sources into the build directory's `_deps`; subsequent builds reuse them.
+Do not commit those downloaded sources or build products. Dependency targets
+use their required C++20 standard; MMModern remains C++17.
+bgfx, bx and bimg are BSD-2-Clause dependencies; distribution packages must
+retain their copyright/license notices. The CMake wrapper is CC0.
+
+Only bgfx and the `shaderc` tool are needed: dependency examples, tests, install
+targets and unrelated tools are disabled. The texture shaders under
+[shaders](../src/platform/sdl/shaders/) are compiled during the application
+build and embedded as generated headers, using `metal`, `s_5_0` or `spirv`
+profiles. A native host build is required for the shader compiler; cross-host
+shader-tool builds are not configured.
+
+On macOS, Apple's Metal/Cocoa frameworks are linked by bgfx's CMake target.
+On Linux, the upstream build also requires X11/OpenGL development libraries
+and `wayland-egl`, even though MMModern selects Vulkan at runtime. A working
+Vulkan driver/loader is required to run that build. Windows uses the upstream
+shader compiler's Direct3D dependencies. Only the native macOS application
+build has been compiled for this migration; Windows and Linux builds and
+visual verification remain unverified.
+
+bgfx is built single-threaded so its frame submission/presentation completes
+inline before the existing input-origin acquisition callbacks. All three
+passes (world, UI/cursor composition, window) stay on the GPU. The original
+indexed framebuffer and decoded original sprite textures are CPU-to-GPU
+uploads; no GPU-to-CPU viewport transfer is used.
+
 ## Pinned ScummVM revision
 
 The validated known-good ScummVM dependency is:

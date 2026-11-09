@@ -1,265 +1,349 @@
 #include "platform/sdl/IndoorGpuRenderer.h"
+#include "platform/sdl/SdlWindowPlacement.h"
 #include "core/IndoorRenderScene.h"
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
-#define GL_GLEXT_PROTOTYPES
-#include <SDL_opengl.h>
+#include <SDL_syswm.h>
+#include <bgfx/bgfx.h>
+
+#include "vs_textured.h"
+#include "fs_textured.h"
 
 #include <algorithm>
-#include <cstddef>
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
-#include <string>
 #include <unordered_map>
 
 namespace mmodern {
 namespace {
-constexpr int scale = 3, viewWidth = 216 * scale, viewHeight = 132 * scale;
+constexpr std::uint64_t pointSampling = BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT |
+	BGFX_SAMPLER_MIP_POINT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+constexpr std::uint64_t colorWrite = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A;
+constexpr std::uint32_t resetFlags = BGFX_RESET_VSYNC | BGFX_RESET_FLIP_AFTER_RENDER;
+constexpr bgfx::ViewId worldView = 0, compositionView = 1, displayView = 2;
+bool deviceActive = false;
+static_assert(sizeof(IndoorVertex) == 5 * sizeof(float), "bgfx vertex layout must match IndoorVertex");
 
-// SDL may itself have a current GL context. Never leave our offscreen one acquired.
-struct ContextRestore {
-	SDL_Window *window = SDL_GL_GetCurrentWindow();
-	SDL_GLContext context = SDL_GL_GetCurrentContext();
-	~ContextRestore() {
-		if (SDL_GL_MakeCurrent(window, context) != 0)
-			std::cerr << "Cannot restore display GL context: " << SDL_GetError() << '\n';
-	}
-};
+template<class Handle> Handle require(Handle handle, const char *what) {
+	if (!bgfx::isValid(handle)) throw std::runtime_error(what);
+	return handle;
+}
 
-#define INDOOR_GL_FUNCTIONS(X) \
-	X(CreateShader) X(ShaderSource) X(CompileShader) X(GetShaderiv) X(GetShaderInfoLog) X(DeleteShader) \
-	X(CreateProgram) X(AttachShader) X(LinkProgram) X(GetProgramiv) X(GetProgramInfoLog) X(DeleteProgram) \
-	X(UseProgram) X(GetUniformLocation) X(UniformMatrix4fv) X(Uniform1i) \
-	X(GenVertexArrays) X(BindVertexArray) X(DeleteVertexArrays) \
-	X(GenBuffers) X(BindBuffer) X(BufferData) X(DeleteBuffers) \
-	X(EnableVertexAttribArray) X(VertexAttribPointer) \
-	X(GenTextures) X(BindTexture) X(TexImage2D) X(TexParameteri) X(DeleteTextures) X(ActiveTexture) \
-	X(GenFramebuffers) X(BindFramebuffer) X(FramebufferTexture2D) X(CheckFramebufferStatus) X(DeleteFramebuffers) \
-	X(GenRenderbuffers) X(BindRenderbuffer) X(RenderbufferStorage) X(FramebufferRenderbuffer) X(DeleteRenderbuffers) \
-	X(Viewport) X(ClearColor) X(Clear) X(Enable) X(Disable) X(DepthFunc) X(DrawArrays) X(ReadPixels) X(PixelStorei) X(GetError)
+template<class Handle> void releaseHandle(Handle &handle) {
+	if (bgfx::isValid(handle)) bgfx::destroy(handle);
+	handle = BGFX_INVALID_HANDLE;
+}
 
-struct Gl {
-#define DECLARE(name) decltype(&gl##name) name = nullptr;
-	INDOOR_GL_FUNCTIONS(DECLARE)
-#undef DECLARE
-	void load() {
-#define LOAD(name) name = reinterpret_cast<decltype(name)>(SDL_GL_GetProcAddress("gl" #name)); \
-		if (!name) throw std::runtime_error("Missing GL function: gl" #name);
-		INDOOR_GL_FUNCTIONS(LOAD)
-#undef LOAD
+std::array<float, 16> ortho(float width, float height) {
+	std::array<float, 16> result{};
+	result[0] = 2 / width; result[5] = -2 / height;
+	result[10] = 1; result[12] = -1; result[13] = 1; result[15] = 1;
+	return result;
+}
+
+bgfx::SwapChain swapChain(SDL_Window *window, int width, int height, bgfx::PlatformData &platform) {
+	SDL_SysWMinfo info{};
+	SDL_VERSION(&info.version);
+	if (!SDL_GetWindowWMInfo(window, &info))
+		throw std::runtime_error(std::string("Cannot obtain bgfx native window: ") + SDL_GetError());
+	bgfx::SwapChain chain;
+	chain.width = std::uint32_t(width); chain.height = std::uint32_t(height);
+	// This bgfx revision initializes Metal before resolving Count/default formats.
+	chain.formatColor = bgfx::TextureFormat::BGRA8;
+	chain.formatDepthStencil = bgfx::TextureFormat::D24S8;
+	switch (info.subsystem) {
+#if defined(SDL_VIDEO_DRIVER_COCOA)
+	case SDL_SYSWM_COCOA: chain.nwh = info.info.cocoa.window; break;
+#endif
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
+	case SDL_SYSWM_WINDOWS: chain.nwh = info.info.win.window; break;
+#endif
+#if defined(SDL_VIDEO_DRIVER_X11)
+	case SDL_SYSWM_X11:
+		chain.nwh = reinterpret_cast<void *>(std::uintptr_t(info.info.x11.window));
+		chain.ndt = info.info.x11.display;
+		break;
+#endif
+#if defined(SDL_VIDEO_DRIVER_WAYLAND)
+	case SDL_SYSWM_WAYLAND:
+		chain.nwh = info.info.wl.surface; chain.ndt = info.info.wl.display;
+		platform.type = bgfx::NativeWindowHandleType::Wayland;
+		break;
+#endif
+	default: throw std::runtime_error("This SDL window system is not supported by the bgfx presenter");
 	}
-	void check(const char *operation) {
-		const auto error = GetError();
-		if (error != GL_NO_ERROR) throw std::runtime_error(std::string(operation) + ": GL error " + std::to_string(error));
-	}
-};
+	return chain;
+}
 } // namespace
 
 struct IndoorGpuRenderer::Impl {
-	SDL_Window *window = nullptr;
-	SDL_GLContext context = nullptr;
-	Gl gl;
-	GLuint program = 0, vao = 0, vbo = 0, framebuffer = 0, color = 0, depth = 0;
+	SDL_Window *window;
+	int frameWidth, frameHeight, outputWidth = 0, outputHeight = 0, compositionScale = 0;
+	bool corrected, initialized = false, enhanced = false;
+	bgfx::SwapChain chain;
+	bgfx::VertexLayout layout;
+	bgfx::ProgramHandle program = BGFX_INVALID_HANDLE;
+	bgfx::UniformHandle sampler = BGFX_INVALID_HANDLE;
+	bgfx::TextureHandle frameTexture = BGFX_INVALID_HANDLE, cursorTexture = BGFX_INVALID_HANDLE;
+	bgfx::FrameBufferHandle worldTarget = BGFX_INVALID_HANDLE, compositionTarget = BGFX_INVALID_HANDLE;
+	int cursorWidth = 0, cursorHeight = 0;
+	IndexedFrame frame;
 	struct Texture {
 		std::weak_ptr<const IndoorTexture> source;
-		GLuint name;
+		bgfx::TextureHandle handle;
 	};
 	std::unordered_map<const IndoorTexture *, Texture> textures;
 	std::array<std::uint8_t, 768> palette{};
 
-	~Impl() {
-		ContextRestore restore;
-		if (restore.context == context) { restore.context = nullptr; restore.window = nullptr; }
-		if (context && SDL_GL_MakeCurrent(window, context) == 0) {
-			for (const auto &entry : textures) gl.DeleteTextures(1, &entry.second.name);
-			if (color) gl.DeleteTextures(1, &color);
-			if (depth) gl.DeleteRenderbuffers(1, &depth);
-			if (framebuffer) gl.DeleteFramebuffers(1, &framebuffer);
-			if (vbo) gl.DeleteBuffers(1, &vbo);
-			if (vao) gl.DeleteVertexArrays(1, &vao);
-			if (program) gl.DeleteProgram(program);
-		}
-		if (context) SDL_GL_DeleteContext(context);
-		if (window) SDL_DestroyWindow(window);
-	}
+	Impl(SDL_Window *window, int width, int height, bool corrected) :
+		window(window), frameWidth(width), frameHeight(height), corrected(corrected) {}
 
-	GLuint shader(GLenum kind, const char *source) {
-		const auto name = gl.CreateShader(kind);
-		gl.ShaderSource(name, 1, &source, nullptr); gl.CompileShader(name);
-		GLint good = 0; gl.GetShaderiv(name, GL_COMPILE_STATUS, &good);
-		if (!good) {
-			char message[2048]{}; gl.GetShaderInfoLog(name, sizeof(message), nullptr, message);
-			gl.DeleteShader(name);
-			throw std::runtime_error(std::string("Indoor shader compilation failed: ") + message);
-		}
-		return name;
+	~Impl() {
+		if (!initialized) return;
+		for (auto &entry : textures) releaseHandle(entry.second.handle);
+		releaseHandle(worldTarget); releaseHandle(compositionTarget);
+		releaseHandle(frameTexture); releaseHandle(cursorTexture);
+		releaseHandle(program); releaseHandle(sampler);
+		bgfx::shutdown();
+		deviceActive = false;
 	}
 
 	void initialize() {
-		// Core GL is the small prototype backend. No fixed-function or platform GL linkage.
-		constexpr SDL_GLattr attributes[]{SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
-			SDL_GL_CONTEXT_PROFILE_MASK};
-		constexpr int values[]{3, 2, SDL_GL_CONTEXT_PROFILE_CORE};
-		int previous[std::size(attributes)]{};
-		for (std::size_t i = 0; i < std::size(attributes); ++i) {
-			if (SDL_GL_GetAttribute(attributes[i], &previous[i]) != 0)
-				throw std::runtime_error(std::string("Cannot query GL attributes: ") + SDL_GetError());
+		if (deviceActive) throw std::runtime_error("Cannot initialize a second bgfx presentation loop");
+		int width = 0, height = 0;
+		SDL_GetWindowSizeInPixels(window, &width, &height);
+		if (width <= 0 || height <= 0) throw std::runtime_error("Invalid bgfx window dimensions");
+		bgfx::Init init;
+#if defined(__APPLE__)
+		init.type = bgfx::RendererType::Metal;
+#elif defined(_WIN32)
+		init.type = bgfx::RendererType::Direct3D11;
+#else
+		init.type = bgfx::RendererType::Vulkan;
+#endif
+		// Shader binaries target this backend; never silently select an incompatible API.
+		init.fallback = false;
+		init.videoDecode = false;
+		chain = swapChain(window, width, height, init.platformData);
+		init.swapChain = chain;
+		init.reset = resetFlags;
+		if (!bgfx::init(init)) throw std::runtime_error("Cannot initialize the bgfx graphics device");
+		initialized = true;
+		deviceActive = true;
+		outputWidth = width; outputHeight = height;
+		layout.begin().add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+			.add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float).end();
+		const auto vertex = require(bgfx::createShader(bgfx::copy(vs_textured, sizeof(vs_textured))),
+			"Cannot create bgfx vertex shader");
+		auto fragment = bgfx::createShader(bgfx::copy(fs_textured, sizeof(fs_textured)));
+		if (!bgfx::isValid(fragment)) {
+			bgfx::destroy(vertex);
+			throw std::runtime_error("Cannot create bgfx fragment shader");
 		}
-		struct AttributeRestore {
-			const SDL_GLattr *attributes; const int *values; std::size_t count;
-			~AttributeRestore() {
-				for (std::size_t i = 0; i < count; ++i)
-					if (SDL_GL_SetAttribute(attributes[i], values[i]) != 0)
-						std::cerr << "Cannot restore GL attributes: " << SDL_GetError() << '\n';
-			}
-		} restore{attributes, previous, std::size(attributes)};
-		for (std::size_t i = 0; i < std::size(attributes); ++i)
-			if (SDL_GL_SetAttribute(attributes[i], values[i]) != 0)
-				throw std::runtime_error(std::string("Cannot configure indoor GL context: ") + SDL_GetError());
-		window = SDL_CreateWindow("MMModern indoor GPU", 0, 0, 16, 16, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
-		if (!window) throw std::runtime_error(std::string("Cannot create indoor GL window: ") + SDL_GetError());
-		context = SDL_GL_CreateContext(window);
-		if (!context) throw std::runtime_error(std::string("Cannot create indoor GL context: ") + SDL_GetError());
-		gl.load();
-		const char *vertexSource = R"(#version 150
-in vec3 position;
-in vec2 texcoord;
-uniform mat4 projection;
-out vec2 uv;
-void main() { uv = texcoord; gl_Position = projection * vec4(position, 1.0); }
-)";
-		const char *fragmentSource = R"(#version 150
-uniform sampler2D image;
-in vec2 uv;
-out vec4 color;
-void main() {
-    color = texture(image, uv);
-    if (color.a < 0.5) discard;
-}
-)";
-		const auto vertex = shader(GL_VERTEX_SHADER, vertexSource);
-		GLuint fragment = 0;
-		try { fragment = shader(GL_FRAGMENT_SHADER, fragmentSource); }
-		catch (...) { gl.DeleteShader(vertex); throw; }
-		program = gl.CreateProgram();
-		gl.AttachShader(program, vertex); gl.AttachShader(program, fragment); gl.LinkProgram(program);
-		gl.DeleteShader(vertex); gl.DeleteShader(fragment);
-		GLint good = 0; gl.GetProgramiv(program, GL_LINK_STATUS, &good);
-		if (!good) {
-			char message[2048]{}; gl.GetProgramInfoLog(program, sizeof(message), nullptr, message);
-			throw std::runtime_error(std::string("Indoor shader link failed: ") + message);
-		}
-		gl.GenVertexArrays(1, &vao); gl.BindVertexArray(vao);
-		gl.GenBuffers(1, &vbo); gl.BindBuffer(GL_ARRAY_BUFFER, vbo);
-		// Explicit locations are bound below through queried shader attributes.
-		const auto getAttribLocation = reinterpret_cast<decltype(&glGetAttribLocation)>(SDL_GL_GetProcAddress("glGetAttribLocation"));
-		if (!getAttribLocation) throw std::runtime_error("Missing GL attribute lookup");
-		for (const auto *name : {"position", "texcoord"}) {
-			const GLint location = getAttribLocation(program, name);
-			if (location < 0) throw std::runtime_error("Missing indoor shader attribute");
-			gl.EnableVertexAttribArray(GLuint(location));
-			const bool position = std::string(name) == "position";
-			gl.VertexAttribPointer(GLuint(location), position ? 3 : 2, GL_FLOAT, GL_FALSE,
-				sizeof(IndoorVertex), reinterpret_cast<const void *>(position ? 0 : offsetof(IndoorVertex, u)));
-		}
-		gl.GenFramebuffers(1, &framebuffer); gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-		gl.GenTextures(1, &color); gl.BindTexture(GL_TEXTURE_2D, color);
-		gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, viewWidth, viewHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
-		gl.GenRenderbuffers(1, &depth); gl.BindRenderbuffer(GL_RENDERBUFFER, depth);
-		gl.RenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, viewWidth, viewHeight);
-		gl.FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
-		if (gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-			throw std::runtime_error("Indoor GPU framebuffer is incomplete");
-		gl.check("Indoor renderer initialization");
+		program = require(bgfx::createProgram(vertex, fragment, true), "Cannot link bgfx texture program");
+		sampler = require(bgfx::createUniform("s_image", bgfx::UniformType::Sampler), "Cannot create bgfx sampler");
+		frameTexture = createTexture(frameWidth, frameHeight);
+		for (auto view : {worldView, compositionView, displayView}) bgfx::setViewMode(view, bgfx::ViewMode::Sequential);
+		bgfx::setViewName(worldView, "Indoor world");
+		bgfx::setViewName(compositionView, "Original UI and cursor");
+		bgfx::setViewName(displayView, "Window presentation");
+		std::cerr << "bgfx presenter: " << bgfx::getRendererName(bgfx::getRendererType()) << '\n';
 	}
 
-	GLuint upload(const std::shared_ptr<const IndoorTexture> &source) {
+	bgfx::TextureHandle createTexture(int width, int height, std::uint64_t flags = pointSampling) {
+		if (width <= 0 || height <= 0 || width > bgfx::getCaps()->limits.maxTextureSize ||
+				height > bgfx::getCaps()->limits.maxTextureSize)
+			throw std::runtime_error("Texture dimensions exceed bgfx device limits");
+		return require(bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), false, 1,
+			bgfx::TextureFormat::RGBA8, flags), "Cannot allocate bgfx texture");
+	}
+
+	bgfx::FrameBufferHandle target(int width, int height, bool depth) {
+		auto color = createTexture(width, height, pointSampling | BGFX_TEXTURE_RT);
+		if (!depth) {
+			const auto result = bgfx::createFrameBuffer(1, &color, true);
+			if (!bgfx::isValid(result)) bgfx::destroy(color);
+			return require(result, "Cannot create bgfx composition target");
+		}
+		bgfx::TextureHandle attachments[]{color, bgfx::createTexture2D(std::uint16_t(width),
+			std::uint16_t(height), false, 1, bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY)};
+		if (!bgfx::isValid(attachments[1])) {
+			bgfx::destroy(color);
+			throw std::runtime_error("Cannot create bgfx depth attachment");
+		}
+		const auto result = bgfx::createFrameBuffer(2, attachments, true);
+		if (!bgfx::isValid(result)) for (const auto attachment : attachments) bgfx::destroy(attachment);
+		return require(result, "Cannot create bgfx indoor target");
+	}
+
+	void draw(bgfx::ViewId view, bgfx::TextureHandle image, const std::array<IndoorVertex, 4> &quad,
+			std::uint64_t state, std::uint32_t sampling = std::uint32_t(pointSampling)) {
+		if (bgfx::getAvailTransientVertexBuffer(6, layout) != 6)
+			throw std::runtime_error("bgfx transient geometry buffer exhausted");
+		bgfx::TransientVertexBuffer buffer;
+		bgfx::allocTransientVertexBuffer(&buffer, 6, layout);
+		const IndoorVertex vertices[]{quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]};
+		std::memcpy(buffer.data, vertices, sizeof(vertices));
+		bgfx::setVertexBuffer(0, &buffer);
+		bgfx::setTexture(0, sampler, image, sampling);
+		bgfx::setState(state);
+		bgfx::submit(view, program);
+	}
+
+	void rectangle(bgfx::ViewId view, bgfx::TextureHandle image, float x, float y, float width, float height,
+			bool targetImage = false, bool blend = false, bool linear = false) {
+		const float top = targetImage && bgfx::getCaps()->originBottomLeft ? 1.f : 0.f;
+		const float bottom = 1 - top;
+		draw(view, image, {{{x, y + height, 0, 0, bottom}, {x + width, y + height, 0, 1, bottom},
+			{x + width, y, 0, 1, top}, {x, y, 0, 0, top}}},
+			colorWrite | (blend ? BGFX_STATE_BLEND_ALPHA : 0),
+			linear ? BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP : std::uint32_t(pointSampling));
+	}
+
+	void updateFrame(const IndexedFrame &supplied, bool modern) {
+		if (!supplied.isValid() || supplied.width != frameWidth || supplied.height != frameHeight)
+			throw std::invalid_argument("Invalid bgfx framebuffer or changed dimensions");
+		enhanced = modern && bool(supplied.indoorScene);
+		if (enhanced && (frameWidth != 320 || frameHeight != 200 ||
+				supplied.indoorScene->originalPixels.size() != supplied.pixels.size() ||
+				supplied.indoorScene->interfaceCoverage.size() != supplied.pixels.size()))
+			throw std::invalid_argument("Invalid indoor scene overlay coverage");
+		std::vector<std::uint8_t> rgba(supplied.pixels.size() * 4);
+		for (std::size_t i = 0; i < supplied.pixels.size(); ++i) {
+			const auto p = std::size_t(supplied.pixels[i]) * 3;
+			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = supplied.palette[p + c];
+			bool transparent = false;
+			if (enhanced) {
+				const auto &scene = *supplied.indoorScene;
+				const auto x = i % frameWidth, y = i / frameWidth;
+				transparent = x >= 8 && x < 224 && y >= 8 && y < 140 &&
+					!scene.interfaceCoverage[i] && supplied.pixels[i] == scene.originalPixels[i];
+			}
+			rgba[i * 4 + 3] = transparent ? 0 : 255;
+		}
+		bgfx::updateTexture2D(frameTexture, 0, 0, 0, 0, std::uint16_t(frameWidth), std::uint16_t(frameHeight),
+			bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+		frame = supplied;
+	}
+
+	bgfx::TextureHandle uploadTexture(const std::shared_ptr<const IndoorTexture> &source) {
 		const auto found = textures.find(source.get());
-		if (found != textures.end()) return found->second.name;
-		GLuint name = 0; gl.GenTextures(1, &name); gl.BindTexture(GL_TEXTURE_2D, name);
-		std::vector<std::uint8_t> rgba(source->indices.size() * 4);
-		for (std::size_t i = 0; i < source->indices.size(); ++i) {
-			const auto offset = std::size_t(source->indices[i]) * 3;
-			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = palette[offset + c];
+		if (found != textures.end()) return found->second.handle;
+		const auto count = std::size_t(source->width) * source->height;
+		if (source->indices.size() != count || source->alpha.size() != count)
+			throw std::invalid_argument("Invalid indoor texture payload");
+		std::vector<std::uint8_t> rgba(count * 4);
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto p = std::size_t(source->indices[i]) * 3;
+			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = palette[p + c];
 			rgba[i * 4 + 3] = source->alpha[i];
 		}
-		gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, source->width, source->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		textures.emplace(source.get(), Texture{source, name});
-		return name;
+		auto image = createTexture(source->width, source->height);
+		bgfx::updateTexture2D(image, 0, 0, 0, 0, std::uint16_t(source->width), std::uint16_t(source->height),
+			bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
+		textures.emplace(source.get(), Texture{source, image});
+		return image;
+	}
+
+	void present(std::optional<std::pair<int, int>> cursorPosition) {
+		int width = 0, height = 0;
+		SDL_GetWindowSizeInPixels(window, &width, &height);
+		if (width <= 0 || height <= 0 || !frame.isValid()) return;
+		if (width > UINT16_MAX || height > UINT16_MAX) throw std::runtime_error("bgfx window is too large");
+		if (width != outputWidth || height != outputHeight) {
+			chain.width = std::uint32_t(width); chain.height = std::uint32_t(height);
+			bgfx::reset(resetFlags, &chain);
+			outputWidth = width; outputHeight = height;
+		}
+		const auto aspect = corrected ? PictureAspect::FourThree : PictureAspect::Square;
+		const auto picture = pictureRect(width, height, frameWidth, frameHeight, aspect);
+		const int limit = bgfx::getCaps()->limits.maxTextureSize;
+		const int wanted = picturePrescale(picture, frameWidth, frameHeight, limit, limit);
+		if (wanted < 1) throw std::runtime_error("bgfx texture limit is smaller than the picture");
+		if (compositionScale != wanted) {
+			releaseHandle(compositionTarget);
+			compositionTarget = target(frameWidth * wanted, frameHeight * wanted, false);
+			compositionScale = wanted;
+		}
+		if (enhanced) {
+			if (!bgfx::isValid(worldTarget)) worldTarget = target(216 * 3, 132 * 3, true);
+			for (auto it = textures.begin(); it != textures.end();) {
+				if (it->second.source.expired() || palette != frame.palette) {
+					releaseHandle(it->second.handle); it = textures.erase(it);
+				} else ++it;
+			}
+			palette = frame.palette;
+			bgfx::setViewFrameBuffer(worldView, worldTarget);
+			bgfx::setViewRect(worldView, 0, 0, 216 * 3, 132 * 3);
+			bgfx::setViewClear(worldView, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.f, 0);
+			constexpr float nearPlane = 0.04f, farPlane = 12.f;
+			const float aspect = 216.f / (132.f * (corrected ? 1.2f : 1.f));
+			std::array<float, 16> projection{};
+			projection[0] = 1 / aspect; projection[5] = 1; projection[11] = -1;
+			if (bgfx::getCaps()->homogeneousDepth) {
+				projection[10] = -(farPlane + nearPlane) / (farPlane - nearPlane);
+				projection[14] = -2 * farPlane * nearPlane / (farPlane - nearPlane);
+			} else {
+				projection[10] = -farPlane / (farPlane - nearPlane);
+				projection[14] = -farPlane * nearPlane / (farPlane - nearPlane);
+			}
+			bgfx::setViewTransform(worldView, nullptr, projection.data());
+			bgfx::touch(worldView);
+			if (!frame.indoorScene->black) for (const auto &quad : frame.indoorScene->quads)
+				draw(worldView, uploadTexture(quad.texture), quad.vertices,
+					colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL);
+		}
+		bgfx::setViewFrameBuffer(compositionView, compositionTarget);
+		bgfx::setViewRect(compositionView, 0, 0, std::uint16_t(frameWidth * wanted), std::uint16_t(frameHeight * wanted));
+		bgfx::setViewClear(compositionView, BGFX_CLEAR_COLOR, 0x000000ff);
+		const auto compositionProjection = ortho(float(frameWidth), float(frameHeight));
+		bgfx::setViewTransform(compositionView, nullptr, compositionProjection.data());
+		if (enhanced) rectangle(compositionView, bgfx::getTexture(worldTarget), 8, 8, 216, 132, true);
+		rectangle(compositionView, frameTexture, 0, 0, float(frameWidth), float(frameHeight), false, true);
+		if (cursorPosition && bgfx::isValid(cursorTexture))
+			rectangle(compositionView, cursorTexture, float(cursorPosition->first), float(cursorPosition->second),
+				float(cursorWidth), float(cursorHeight), false, true);
+		bgfx::setViewFrameBuffer(displayView, BGFX_INVALID_HANDLE);
+		bgfx::setViewRect(displayView, 0, 0, std::uint16_t(width), std::uint16_t(height));
+		bgfx::setViewClear(displayView, BGFX_CLEAR_COLOR, 0x000000ff);
+		const auto displayProjection = ortho(float(width), float(height));
+		bgfx::setViewTransform(displayView, nullptr, displayProjection.data());
+		rectangle(displayView, bgfx::getTexture(compositionTarget), float(picture.x), float(picture.y),
+			float(picture.width), float(picture.height), true, false, corrected);
+		// Single-threaded bgfx presents before returning: acquisition still follows actual submission.
+		bgfx::frame();
 	}
 };
 
-IndoorGpuRenderer::IndoorGpuRenderer(float displayPixelAspect) : _displayPixelAspect(displayPixelAspect) {
-	if (displayPixelAspect <= 0) throw std::invalid_argument("Invalid indoor display pixel aspect");
+IndoorGpuRenderer::IndoorGpuRenderer(SDL_Window *window, int width, int height, bool corrected) :
+	_impl(std::make_unique<Impl>(window, width, height, corrected)) {
+	_impl->initialize();
 }
 IndoorGpuRenderer::~IndoorGpuRenderer() = default;
-
-std::vector<std::uint32_t> IndoorGpuRenderer::render(const IndexedFrame &frame) {
-	if (!frame.indoorScene || !frame.isValid() || frame.width != 320 || frame.height != 200)
-		throw std::invalid_argument("Indoor GPU rendering requires a 320x200 scene snapshot");
-	const auto &scene = *frame.indoorScene;
-	if (scene.originalPixels.size() != frame.pixels.size() || scene.interfaceCoverage.size() != frame.pixels.size())
-		throw std::invalid_argument("Invalid indoor scene overlay coverage");
-	ContextRestore restore;
-	if (!_impl) {
-		auto impl = std::make_unique<Impl>();
-		impl->initialize();
-		_impl = std::move(impl);
+void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern) { _impl->updateFrame(frame, modern); }
+void IndoorGpuRenderer::present(std::optional<std::pair<int, int>> cursorPosition) { _impl->present(cursorPosition); }
+std::pair<int, int> IndoorGpuRenderer::outputSize() const {
+	int width = 0, height = 0;
+	SDL_GetWindowSizeInPixels(_impl->window, &width, &height);
+	return {width, height};
+}
+void IndoorGpuRenderer::cursor(const IndexedFrame &frame) {
+	if (!frame.isValid()) throw std::invalid_argument("Invalid original cursor");
+	auto &r = *_impl;
+	releaseHandle(r.cursorTexture);
+	r.cursorTexture = r.createTexture(frame.width, frame.height);
+	r.cursorWidth = frame.width; r.cursorHeight = frame.height;
+	std::vector<std::uint8_t> rgba(frame.pixels.size() * 4);
+	for (std::size_t i = 0; i < frame.pixels.size(); ++i) {
+		const auto p = std::size_t(frame.pixels[i]) * 3;
+		for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = frame.palette[p + c];
+		rgba[i * 4 + 3] = frame.pixels[i] ? 255 : 0;
 	}
-	auto &r = *_impl; auto &gl = r.gl;
-	if (SDL_GL_MakeCurrent(r.window, r.context) != 0)
-		throw std::runtime_error(std::string("Cannot acquire indoor GL context: ") + SDL_GetError());
-	for (auto it = r.textures.begin(); it != r.textures.end();) {
-		if (it->second.source.expired() || r.palette != frame.palette) {
-			gl.DeleteTextures(1, &it->second.name); it = r.textures.erase(it);
-		} else ++it;
-	}
-	r.palette = frame.palette;
-	gl.BindFramebuffer(GL_FRAMEBUFFER, r.framebuffer);
-	gl.Viewport(0, 0, viewWidth, viewHeight);
-	gl.ClearColor(0, 0, 0, 1); gl.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	gl.Enable(GL_DEPTH_TEST); gl.DepthFunc(GL_LEQUAL); gl.Disable(GL_CULL_FACE); gl.Disable(GL_BLEND);
-	gl.UseProgram(r.program); gl.BindVertexArray(r.vao); gl.BindBuffer(GL_ARRAY_BUFFER, r.vbo);
-	gl.ActiveTexture(GL_TEXTURE0); gl.Uniform1i(gl.GetUniformLocation(r.program, "image"), 0);
-	// Match the displayed viewport, not its pre-aspect-correction framebuffer.
-	constexpr float nearPlane = 0.04f, farPlane = 12.f;
-	const float aspect = float(viewWidth) / (viewHeight * _displayPixelAspect);
-	const GLfloat projection[]{1 / aspect, 0, 0, 0, 0, 1, 0, 0,
-		0, 0, -(farPlane + nearPlane) / (farPlane - nearPlane), -1,
-		0, 0, -2 * farPlane * nearPlane / (farPlane - nearPlane), 0};
-	gl.UniformMatrix4fv(gl.GetUniformLocation(r.program, "projection"), 1, GL_FALSE, projection);
-	if (!scene.black) for (const auto &quad : scene.quads) {
-		gl.BindTexture(GL_TEXTURE_2D, r.upload(quad.texture));
-		const IndoorVertex vertices[]{quad.vertices[0], quad.vertices[1], quad.vertices[2],
-			quad.vertices[0], quad.vertices[2], quad.vertices[3]};
-		gl.BufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STREAM_DRAW);
-		gl.DrawArrays(GL_TRIANGLES, 0, 6);
-	}
-	std::vector<std::uint8_t> view(std::size_t(viewWidth) * viewHeight * 4);
-	gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
-	gl.ReadPixels(0, 0, viewWidth, viewHeight, GL_RGBA, GL_UNSIGNED_BYTE, view.data());
-	gl.check("Indoor GPU rendering");
-	std::vector<std::uint32_t> pixels(std::size_t(320 * scale) * 200 * scale);
-	for (int y = 0; y < 200 * scale; ++y) for (int x = 0; x < 320 * scale; ++x) {
-		const auto native = std::size_t(y / scale) * 320 + x / scale;
-		const auto offset = std::size_t(frame.pixels[native]) * 3;
-		std::uint32_t color = 0xff000000u | (std::uint32_t(frame.palette[offset]) << 16) |
-			(std::uint32_t(frame.palette[offset + 1]) << 8) | frame.palette[offset + 2];
-		if (x >= 8 * scale && x < 224 * scale && y >= 8 * scale && y < 140 * scale &&
-			!scene.interfaceCoverage[native] && frame.pixels[native] == scene.originalPixels[native]) {
-			const auto p = (std::size_t(viewHeight - 1 - (y - 8 * scale)) * viewWidth + x - 8 * scale) * 4;
-			color = 0xff000000u | (std::uint32_t(view[p]) << 16) | (std::uint32_t(view[p + 1]) << 8) | view[p + 2];
-		}
-		pixels[std::size_t(y) * 320 * scale + x] = color;
-	}
-	return pixels;
+	bgfx::updateTexture2D(r.cursorTexture, 0, 0, 0, 0, std::uint16_t(frame.width), std::uint16_t(frame.height),
+		bgfx::copy(rgba.data(), std::uint32_t(rgba.size())));
 }
 } // namespace mmodern
