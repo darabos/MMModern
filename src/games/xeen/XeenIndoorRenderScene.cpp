@@ -11,6 +11,11 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		XeenWorld &world, const XeenCamera &camera,
 		const std::vector<XeenIndoorDrawCommand> &commands) {
 	auto scene = std::make_shared<IndoorRenderScene>();
+	// IndoorDrawList: nearest front wall (32,24)..(200,109), next
+	// (64,40)..(168,93). F/(0.5+B)=168, F/(1.5+B)=104.
+	scene->focalLength = 273.f;
+	scene->cameraSetback = 1.125f;
+	scene->horizon = 66.5f - 8.f;
 	const auto &map = world.map(camera.mapId);
 	const auto resources = xeenMapResources(camera.mapId);
 	static constexpr const char *prefixes[]{"town", "cave", "towr", "cstl", "dung", "scfi"};

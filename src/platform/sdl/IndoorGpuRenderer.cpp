@@ -280,10 +280,20 @@ struct IndoorGpuRenderer::Impl {
 			bgfx::setViewFrameBuffer(worldView, worldTarget);
 			bgfx::setViewRect(worldView, 0, 0, 216 * 3, 132 * 3);
 			bgfx::setViewClear(worldView, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.f, 0);
-			constexpr float nearPlane = 0.04f, farPlane = 12.f;
-			const float aspect = 216.f / (132.f * (corrected ? 1.2f : 1.f));
+			const auto &scene = *frame.indoorScene;
+			// Set back the virtual eye, but keep clipping at the party rather
+			// than exposing walls behind it. The original 4:3 stretch happens
+			// during presentation, not in this native-pixel calibration.
+			const float nearPlane = scene.cameraSetback + 0.04f;
+			const float farPlane = scene.cameraSetback + 12.f;
+			std::array<float, 16> view{};
+			view[0] = view[5] = view[10] = view[15] = 1;
+			view[14] = -scene.cameraSetback;
 			std::array<float, 16> projection{};
-			projection[0] = 1 / aspect; projection[5] = 1; projection[11] = -1;
+			projection[0] = 2 * scene.focalLength / 216.f;
+			projection[5] = 2 * scene.focalLength / 132.f;
+			projection[9] = 2 * scene.horizon / 132.f - 1;
+			projection[11] = -1;
 			if (bgfx::getCaps()->homogeneousDepth) {
 				projection[10] = -(farPlane + nearPlane) / (farPlane - nearPlane);
 				projection[14] = -2 * farPlane * nearPlane / (farPlane - nearPlane);
@@ -291,7 +301,7 @@ struct IndoorGpuRenderer::Impl {
 				projection[10] = -farPlane / (farPlane - nearPlane);
 				projection[14] = -farPlane * nearPlane / (farPlane - nearPlane);
 			}
-			bgfx::setViewTransform(worldView, nullptr, projection.data());
+			bgfx::setViewTransform(worldView, view.data(), projection.data());
 			bgfx::touch(worldView);
 			if (!frame.indoorScene->black) for (const auto &quad : frame.indoorScene->quads)
 				draw(worldView, uploadTexture(quad.texture), quad.vertices,

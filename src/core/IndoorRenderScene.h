@@ -26,6 +26,8 @@ struct IndoorQuad {
 struct IndoorRenderScene {
 	std::vector<IndoorQuad> quads;
 	std::vector<std::uint8_t> originalPixels, interfaceCoverage;
+	// Projection calibration in original viewport pixels and grid-cell units.
+	float focalLength = 0, horizon = 0, cameraSetback = 0;
 	bool black = false;
 };
 
