@@ -549,6 +549,7 @@ XeenEncounterResult XeenActorApproach::regionalTransition(XeenWorld &world,XeenP
 						const auto navigation=*action==XeenEncounterAction::Forward?NavigationAction::MoveForward:
 							*action==XeenEncounterAction::Backward?NavigationAction::MoveBackward:
 							*action==XeenEncounterAction::StrafeLeft?NavigationAction::StrafeLeft:NavigationAction::StrafeRight;
+						c.gpuNavigation = navigation;
                         const bool door=*action==XeenEncounterAction::Forward && XeenMovement::doorAhead(world,c.camera);
                         result=XeenMovement().apply(world,c.camera,navigation,XeenMovement::capabilities(party));
                         if(door && result==XeenMovementResult::Moved) {xeenEmitFmEffect(effect,47);c.openDoor=true;}
@@ -564,7 +565,10 @@ XeenEncounterResult XeenActorApproach::regionalTransition(XeenWorld &world,XeenP
                             require(c.destinationEvents->mapId==c.camera.mapId,"Border Event identity changed");
                             c.actors=c.destinationWorld->sessionState().regionalActors(c.camera.mapId);
                         }
-					} else result=XeenMovement().apply(world,c.camera,*action==XeenEncounterAction::Left?NavigationAction::TurnLeft:NavigationAction::TurnRight);
+					} else {
+						c.gpuNavigation = *action==XeenEncounterAction::Left?NavigationAction::TurnLeft:NavigationAction::TurnRight;
+						result=XeenMovement().apply(world,c.camera,*c.gpuNavigation);
+					}
 					charge=result==XeenMovementResult::Moved;stepTime=charge || result==XeenMovementResult::Turned;
 					if(!stepTime) {
                         c.result.outcome=XeenEncounterOutcome::Blocked;
@@ -684,6 +688,9 @@ XeenEncounterResult XeenActorApproach::regionalTransition(XeenWorld &world,XeenP
         std::optional<XeenScenePresentation> presentation;
         if(c.destinationWorld)presentation=world.prepareSpawnPresentation(*c.destinationWorld);
         if(c.destinationWorld) {require(c.destinationFlags.has_value(),"Map load flags are absent");world.checkTransitionTreasure(*c.destinationWorld);}
+		auto gpuCamera = world.scenePresentation().gpuCameraState;
+		if (c.gpuNavigation) gpuCamera.navigate(camera, c.camera, *c.gpuNavigation);
+		else gpuCamera.observe(c.camera);
         check();
 		c.result.revision=entry._revision+1;
 		// One nonthrowing publication spans both opportunities and the full tick.
@@ -696,6 +703,7 @@ XeenEncounterResult XeenActorApproach::regionalTransition(XeenWorld &world,XeenP
         } else regionalActors.swap(c.actors);
         session._journeyRandom=c.random.continuation();
 		camera=c.camera;party.encounterContext=c.context;
+		world.scenePresentation().gpuCameraState=std::move(gpuCamera);
 		if(c.dangerSense)world.scenePresentation().dangerSense=*c.dangerSense;
 		if(c.terrain) {
 			party.serviceEconomy=c.terrain->economy;

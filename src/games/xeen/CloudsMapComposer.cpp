@@ -127,7 +127,7 @@ IndexedFrame CloudsMapComposer::compose(XeenAssetSource &assets,
 			if(const auto *object=command.object()) return object->visual.status==XeenObjectVisualStatus::SupportedAnimated;
 			return !command.projectile() && !command.splat() && command.geometry().animated;
 		});
-		indoorScene = buildIndoorRenderScene(assets, world, camera, commands);
+		indoorScene = buildIndoorRenderScene(assets, world, camera, commands, ordinaryPhase);
 		indoorScene->interfaceCoverage.assign(320 * 200, 0);
 		drawIndoorCommands(assets,commands,archive,&indoorScene->interfaceCoverage);
 	}

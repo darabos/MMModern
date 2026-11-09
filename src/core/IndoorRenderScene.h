@@ -23,14 +23,23 @@ struct IndoorQuad {
 	std::shared_ptr<const IndoorTexture> texture;
 	std::array<IndoorVertex, 4> vertices;
 	bool distort = true;
+	bool wall = false, billboard = false;
+	float anchorX = 0, anchorZ = 0;
 };
 
-// Camera-relative geometry; immutable once acquired by the presentation loop.
+struct IndoorCameraPose {
+	std::uint32_t map = 0;
+	double x = 0, y = 0, turns = 0;
+};
+
+// World-space geometry; immutable once acquired by the presentation loop.
 struct IndoorRenderScene {
 	std::vector<IndoorQuad> quads;
 	std::vector<std::uint8_t> originalPixels, interfaceCoverage;
 	// Projection calibration in original viewport pixels and grid-cell units.
 	float focalLength = 0, horizon = 0, cameraSetback = 0;
+	IndoorCameraPose camera;
+	std::shared_ptr<const std::uint8_t> cameraContinuity;
 	bool black = false;
 };
 

@@ -17,10 +17,12 @@ XeenAutomaticEventResult XeenNavigationFlow::processInitialEvent(
 XeenNavigationFlowResult XeenNavigationFlow::processNavigationAction(
 		XeenWorld &world, XeenPartyState &partyState, XeenCamera &camera,
 		XeenGameFlags &gameFlags, NavigationAction action) {
+	const auto before = camera;
 	const XeenMovementResult movementResult = _movement.apply(world, camera, action,XeenMovement::capabilities(partyState));
 	const auto cameraAfterMovement = camera;
  if(movementResult!=XeenMovementResult::Moved && movementResult!=XeenMovementResult::Turned)
      return {movementResult,{},cameraAfterMovement};
+ world.scenePresentation().navigateGpuCamera(before, camera, action);
  world.scenePresentation().markLightingStep();
 	return {movementResult,
 		XeenAutomaticEventNoTrigger{}, cameraAfterMovement};

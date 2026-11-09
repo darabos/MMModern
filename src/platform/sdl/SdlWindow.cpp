@@ -65,7 +65,7 @@ bool uploadFrame(IndoorGpuRenderer &gpu, const IndexedFrame &frame,
 		std::cerr << "Invalid indexed framebuffer or changed dimensions.\n";
 		return false;
 	}
-	gpu.upload(frame, modernIndoor && allowModern);
+	gpu.upload(frame, modernIndoor, allowModern);
 	return true;
 }
 
@@ -793,7 +793,21 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         }
         if(nextRepeat && *nextRepeat>repeatSample && !mouseButtons)
             wait=std::min(wait,int(std::min<std::uint64_t>(1000,PresentationClock::ceilMilliseconds(*nextRepeat-repeatSample))));
-        if (SDL_WaitEventTimeout(&event, wait)) {
+        // Cosmetic flips stay inside this wait: no new gameplay cycle, idle
+        // work or frame-acquisition callbacks until the original wake/event.
+        const auto semanticWake = PresentationClock::checkedAdd(SdlWindow::presentationNanoseconds(),
+            std::uint64_t(wait) * 1000000);
+        bool receivedEvent = false;
+        for (;;) {
+            const auto now = SdlWindow::presentationNanoseconds();
+            const int remaining = now >= semanticWake ? 0 :
+                int(PresentationClock::ceilMilliseconds(semanticWake - now));
+            const bool cosmetic = gpu.animating() && remaining > 16;
+            receivedEvent = SDL_WaitEventTimeout(&event, cosmetic ? 16 : remaining);
+            if (receivedEvent || !cosmetic || SdlWindow::presentationNanoseconds() >= semanticWake) break;
+            present();
+        }
+        if (receivedEvent) {
 			do {
 				dispatchEvent(event,batchInput,batchFrame,batchContext);
 			} while (running && SDL_PollEvent(&event));

@@ -1,5 +1,6 @@
 #include "platform/sdl/IndoorGpuRenderer.h"
 #include "platform/sdl/SdlWindowPlacement.h"
+#include "platform/sdl/IndoorCameraSpring.h"
 #include "core/IndoorRenderScene.h"
 
 #define SDL_MAIN_HANDLED
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -44,6 +46,24 @@ std::array<float, 16> ortho(float width, float height) {
 	std::array<float, 16> result{};
 	result[0] = 2 / width; result[5] = -2 / height;
 	result[10] = 1; result[12] = -1; result[13] = 1; result[15] = 1;
+	return result;
+}
+
+std::vector<IndoorVertex> clipDepth(const std::vector<IndoorVertex> &polygon, float plane, bool above) {
+	std::vector<IndoorVertex> result;
+	if (polygon.empty()) return result;
+	auto previous = polygon.back();
+	const auto inside = [&](const auto &v) { return above ? v.z >= plane : v.z <= plane; };
+	for (const auto &current : polygon) {
+		if (inside(previous) != inside(current)) {
+			const float t = (plane - previous.z) / (current.z - previous.z);
+			const auto lerp = [&](float a, float b) { return a + t * (b - a); };
+			result.push_back({lerp(previous.x, current.x), lerp(previous.y, current.y), plane,
+				lerp(previous.u, current.u), lerp(previous.v, current.v)});
+		}
+		if (inside(current)) result.push_back(current);
+		previous = current;
+	}
 	return result;
 }
 
@@ -95,6 +115,15 @@ struct IndoorGpuRenderer::Impl {
 	bgfx::FrameBufferHandle worldTarget = BGFX_INVALID_HANDLE, compositionTarget = BGFX_INVALID_HANDLE;
 	int cursorWidth = 0, cursorHeight = 0;
 	IndexedFrame frame;
+	IndoorCameraSpring camera;
+	std::shared_ptr<const std::uint8_t> cameraContinuity;
+	std::chrono::steady_clock::time_point cameraSample = std::chrono::steady_clock::now();
+	bool modernEnabled = false;
+	void advanceCamera() {
+		const auto now = std::chrono::steady_clock::now();
+		camera.advance(std::chrono::duration<double>(now - cameraSample).count());
+		cameraSample = now;
+	}
 	struct Texture {
 		std::weak_ptr<const IndoorTexture> source;
 		bgfx::TextureHandle handle;
@@ -196,28 +225,11 @@ struct IndoorGpuRenderer::Impl {
 		};
 		if (distort) {
 			// Absolute depth slices keep adjacent meshes' shared edges aligned.
-			const auto clip = [](const std::vector<IndoorVertex> &polygon, float plane, bool above) {
-				std::vector<IndoorVertex> result;
-				if (polygon.empty()) return result;
-				auto previous = polygon.back();
-				const auto inside = [&](const auto &v) { return above ? v.z >= plane : v.z <= plane; };
-				for (const auto &current : polygon) {
-					if (inside(previous) != inside(current)) {
-						const float t = (plane - previous.z) / (current.z - previous.z);
-						const auto lerp = [&](float a, float b) { return a + t * (b - a); };
-						result.push_back({lerp(previous.x, current.x), lerp(previous.y, current.y), plane,
-							lerp(previous.u, current.u), lerp(previous.v, current.v)});
-					}
-					if (inside(current)) result.push_back(current);
-					previous = current;
-				}
-				return result;
-			};
 			float minimum = quad[0].z, maximum = minimum;
 			for (const auto &v : quad) { minimum = std::min(minimum, v.z); maximum = std::max(maximum, v.z); }
 			if (minimum == maximum) append({quad.begin(), quad.end()});
 			else for (float plane = std::floor(minimum * 8) / 8; plane < maximum; plane += 0.125f)
-				append(clip(clip({quad.begin(), quad.end()}, plane, true), plane + 0.125f, false));
+				append(clipDepth(clipDepth({quad.begin(), quad.end()}, plane, true), plane + 0.125f, false));
 		} else append({quad.begin(), quad.end()});
 		const auto count = std::uint32_t(vertices.size());
 		if (!count) return;
@@ -245,10 +257,17 @@ struct IndoorGpuRenderer::Impl {
 			linear ? BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP : std::uint32_t(pointSampling));
 	}
 
-	void updateFrame(const IndexedFrame &supplied, bool modern) {
+	void updateFrame(const IndexedFrame &supplied, bool modern, bool allowWorld) {
 		if (!supplied.isValid() || supplied.width != frameWidth || supplied.height != frameHeight)
 			throw std::invalid_argument("Invalid bgfx framebuffer or changed dimensions");
-		enhanced = modern && bool(supplied.indoorScene);
+		advanceCamera();
+		if (modern && supplied.indoorScene) {
+			const auto &scene = *supplied.indoorScene;
+			camera.target(scene.camera, !modernEnabled || cameraContinuity != scene.cameraContinuity);
+			cameraContinuity = scene.cameraContinuity;
+		}
+		modernEnabled = modern;
+		enhanced = modern && allowWorld && bool(supplied.indoorScene);
 		if (enhanced && (frameWidth != 320 || frameHeight != 200 ||
 				supplied.indoorScene->originalPixels.size() != supplied.pixels.size() ||
 				supplied.indoorScene->interfaceCoverage.size() != supplied.pixels.size()))
@@ -291,6 +310,7 @@ struct IndoorGpuRenderer::Impl {
 	}
 
 	void present(std::optional<std::pair<int, int>> cursorPosition) {
+		advanceCamera();
 		int width = 0, height = 0;
 		SDL_GetWindowSizeInPixels(window, &width, &height);
 		if (width <= 0 || height <= 0 || !frame.isValid()) return;
@@ -322,9 +342,7 @@ struct IndoorGpuRenderer::Impl {
 			bgfx::setViewRect(worldView, 0, 0, 216 * 3, 132 * 3);
 			bgfx::setViewClear(worldView, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.f, 0);
 			const auto &scene = *frame.indoorScene;
-			// Environment is clipped at the party by the scene builder;
-			// grounded objects may sit closer to the virtual eye.
-			// The original 4:3 stretch happens during presentation.
+			// Geometry is transformed into the animated party basis below.
 			constexpr float nearPlane = 0.04f;
 			const float farPlane = scene.cameraSetback + 12.f;
 			std::array<float, 16> view{};
@@ -344,10 +362,57 @@ struct IndoorGpuRenderer::Impl {
 			}
 			bgfx::setViewTransform(worldView, view.data(), projection.data());
 			bgfx::touch(worldView);
-			if (!frame.indoorScene->black) for (const auto &quad : frame.indoorScene->quads)
-				draw(worldView, uploadTexture(quad.texture), quad.vertices,
-					colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL,
-					std::uint32_t(pointSampling), quad.distort);
+			const auto pose = camera.pose();
+			const double angle = pose.turns * 1.57079632679489661923;
+			const float sine = float(std::sin(angle)), cosine = float(std::cos(angle));
+			const auto cameraVertex = [&](IndoorVertex v) {
+				const float dx = v.x - float(pose.x), dy = -v.z - float(pose.y);
+				v.x = cosine * dx - sine * dy;
+				v.z = -(sine * dx + cosine * dy);
+				return v;
+			};
+			if (!frame.indoorScene->black) for (const auto &quad : frame.indoorScene->quads) {
+				auto vertices = quad.vertices;
+				if (quad.billboard) {
+					const auto anchor = cameraVertex({quad.anchorX, 0, quad.anchorZ, 0, 0});
+					for (auto &v : vertices) { v.x += anchor.x; v.z += anchor.z; }
+				} else if (quad.distort) {
+					if (quad.wall) {
+						const auto &a = vertices[0], &b = vertices[1];
+						const float normalX = -(b.z - a.z), normalZ = b.x - a.x;
+						if (normalX * (float(pose.x) - a.x) +
+								normalZ * (-float(pose.y) - a.z) <= 0) continue;
+					}
+					for (auto &v : vertices) v = cameraVertex(v);
+				}
+				if (quad.distort) {
+					if (std::all_of(vertices.begin(), vertices.end(), [](const auto &v) { return v.z < -12; }) ||
+							std::all_of(vertices.begin(), vertices.end(), [](const auto &v) { return v.z > 1.085f; }))
+						continue;
+					// Conservative horizontal rejection includes the widest warped frustum.
+					if (std::all_of(vertices.begin(), vertices.end(), [](const auto &v) {
+							return v.x > 3 * std::max(0.04f, 1.125f - v.z); }) ||
+							std::all_of(vertices.begin(), vertices.end(), [](const auto &v) {
+							return v.x < -3 * std::max(0.04f, 1.125f - v.z); })) continue;
+				}
+				if (!quad.wall) {
+					draw(worldView, uploadTexture(quad.texture), vertices,
+						colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL,
+						std::uint32_t(pointSampling), quad.distort);
+					continue;
+				}
+				// Do not expose walls between the virtual eye and the animated
+				// party anchor. Floors and foreground objects are exempt.
+				const auto clipped = clipDepth({vertices.begin(), vertices.end()}, -0.04f, false);
+				if (clipped.size() == 4) {
+					draw(worldView, uploadTexture(quad.texture), {clipped[0], clipped[1], clipped[2], clipped[3]},
+						colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL,
+						std::uint32_t(pointSampling), true);
+				} else for (std::size_t i = 1; i + 1 < clipped.size(); ++i)
+					draw(worldView, uploadTexture(quad.texture), {clipped[0], clipped[i], clipped[i + 1], clipped[i + 1]},
+						colorWrite | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LEQUAL,
+						std::uint32_t(pointSampling), true);
+			}
 		}
 		bgfx::setViewFrameBuffer(compositionView, compositionTarget);
 		bgfx::setViewRect(compositionView, 0, 0, std::uint16_t(frameWidth * wanted), std::uint16_t(frameHeight * wanted));
@@ -376,7 +441,10 @@ IndoorGpuRenderer::IndoorGpuRenderer(SDL_Window *window, int width, int height, 
 	_impl->initialize();
 }
 IndoorGpuRenderer::~IndoorGpuRenderer() = default;
-void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern) { _impl->updateFrame(frame, modern); }
+void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowWorld) {
+	_impl->updateFrame(frame, modern, allowWorld);
+}
+bool IndoorGpuRenderer::animating() const { return _impl->modernEnabled && _impl->camera.moving(); }
 void IndoorGpuRenderer::present(std::optional<std::pair<int, int>> cursorPosition) { _impl->present(cursorPosition); }
 std::pair<int, int> IndoorGpuRenderer::outputSize() const {
 	int width = 0, height = 0;

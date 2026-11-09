@@ -41,6 +41,10 @@ public:
 			integrity("Event publication owner identity changed");
 		// All allocation and provider work precede the callback-free stores.
 		auto presentation=world.prepareSpawnPresentation(candidateWorld);
+		if (!xeen_state::sameCamera(camera, candidate.cameraValue)) {
+			presentation.gpuCameraState.continuity.reset();
+			presentation.gpuCameraState.observe(candidate.cameraValue);
+		}
   for(unsigned owner=0;owner<30;++owner) {
    const auto &effect=candidateWorld.scenePresentation().portraits[owner];
    if(effect.damageTicks && !effect.damageDeadline)damageEffects[owner]=effect.damageFrame;

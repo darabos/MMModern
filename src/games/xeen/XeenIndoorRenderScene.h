@@ -7,6 +7,7 @@
 namespace mmodern {
 class XeenAssetSource;
 std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &, XeenWorld &,
-	const XeenCamera &, const std::vector<XeenIndoorDrawCommand> &);
+	const XeenCamera &, const std::vector<XeenIndoorDrawCommand> &,
+	std::optional<std::uint64_t> ordinaryPhase = std::nullopt);
 }
 #endif

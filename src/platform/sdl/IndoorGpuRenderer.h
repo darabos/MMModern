@@ -15,9 +15,10 @@ public:
 	~IndoorGpuRenderer();
 	IndoorGpuRenderer(const IndoorGpuRenderer &) = delete;
 	IndoorGpuRenderer &operator=(const IndoorGpuRenderer &) = delete;
-	void upload(const IndexedFrame &, bool modern);
+	void upload(const IndexedFrame &, bool modern, bool allowWorld = true);
 	void cursor(const IndexedFrame &);
 	void present(std::optional<std::pair<int, int>> cursorPosition);
+	bool animating() const;
 	std::pair<int, int> outputSize() const;
 private:
 	struct Impl;

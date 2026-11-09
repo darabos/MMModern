@@ -107,6 +107,7 @@ private:
 // Retained preparation of one existing action/pulse publication. Flow holds the
 // continuation while Approach retains sole authority to publish world deltas.
 struct XeenRegionalActionCandidate {
+ std::optional<NavigationAction> gpuNavigation;
  bool fmStep=false;
  bool openDoor=false;
 	// An outdoor border load stays detached until the whole step can publish.

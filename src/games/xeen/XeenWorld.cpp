@@ -201,6 +201,7 @@ void XeenWorld::borrowTreasureStaging(XeenTreasureStagingState &state) {
 
 void XeenWorld::swapPreparedState(XeenWorld &candidate) noexcept {
  _scenePresentation.completeLightingDraw(); // Exact restore never replays a pending step.
+	_scenePresentation.gpuCameraState.continuity.reset();
 	XeenMutationWatch::write(this);XeenMutationWatch::write(&candidate);
 	// Private to guarded save publication. Never swaps/clears encounter authority.
 	// The whole per-map table, monster tables included, moves as one value.

@@ -6,9 +6,12 @@
 #include "core/NavigationAction.h"
 #include "core/PresentationClock.h"
 #include "core/IndexedFrame.h"
+#include "core/IndoorRenderScene.h"
+#include "games/xeen/XeenNavigation.h"
 #include "formats/xeen/XeenMonsterAppearance.h"
 #include <map>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -84,6 +87,51 @@ struct XeenObjectFrames {
 
 class XeenScenePresentation {
 public:
+	struct GpuCameraState {
+		IndoorCameraPose pose;
+		std::shared_ptr<const std::uint8_t> continuity;
+		static IndoorCameraPose cameraPose(const XeenCamera &camera) {
+			return {std::uint32_t(camera.mapId.number) | (std::uint32_t(camera.mapId.side) << 16),
+				double(int(camera.x)), double(int(camera.y)), double(static_cast<unsigned>(XeenDirection(camera.direction)))};
+		}
+		void observe(const XeenCamera &camera) {
+			const auto next = cameraPose(camera);
+			const auto facing = static_cast<unsigned>(XeenDirection(camera.direction));
+			const auto previousFacing = (static_cast<int>(std::fmod(pose.turns, 4.0)) + 4) % 4;
+			if (!continuity || pose.map != next.map || pose.x != next.x ||
+					pose.y != next.y || previousFacing != int(facing)) {
+				pose = next;
+				continuity = std::make_shared<const std::uint8_t>(0);
+			}
+		}
+		void navigate(const XeenCamera &before, const XeenCamera &after, NavigationAction action) {
+			observe(before);
+			const auto next = cameraPose(after);
+			auto expected = cameraPose(before);
+			const int facing = static_cast<int>(XeenDirection(before.direction));
+			if (action == NavigationAction::TurnLeft) expected.turns = (facing + 3) % 4;
+			else if (action == NavigationAction::TurnRight) expected.turns = (facing + 1) % 4;
+			else {
+				const int direction = (facing + (action == NavigationAction::MoveBackward ? 2 :
+					action == NavigationAction::StrafeLeft ? 3 : action == NavigationAction::StrafeRight ? 1 : 0)) % 4;
+				constexpr int dx[]{0, 1, 0, -1}, dy[]{1, 0, -1, 0};
+				expected.x += dx[direction]; expected.y += dy[direction];
+			}
+			if (expected.map != next.map || expected.x != next.x || expected.y != next.y ||
+					expected.turns != next.turns) {
+				observe(after);
+				return;
+			}
+			pose.x = next.x; pose.y = next.y;
+			if (action == NavigationAction::TurnLeft) pose.turns -= 1;
+			if (action == NavigationAction::TurnRight) pose.turns += 1;
+		}
+	};
+	GpuCameraState gpuCameraState;
+	void publishGpuCamera(const XeenCamera &camera) { gpuCameraState.observe(camera); }
+	void navigateGpuCamera(const XeenCamera &before, const XeenCamera &after, NavigationAction action) {
+		gpuCameraState.navigate(before, after, action);
+	}
  // DS:3067 is an unsaved pending lighting check, separate from exploration.
  // A failed composition may retry its prepared light value without spending again.
  XeenMutable<bool> lightingStepped=false, lightingPrepared=false;

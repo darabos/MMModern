@@ -3666,6 +3666,9 @@ IndexedFrame XeenEventFlow::handleExplorationAction(const PlayerAction &physical
 				(accepted.revision > entry.state.revision() &&
 				(accepted.outcome == XeenEncounterOutcome::Accepted || accepted.outcome == XeenEncounterOutcome::Blocked))))
 			{
+				if (entry.combat)
+					_world.scenePresentation().navigateGpuCamera(cameraBeforeAction, _camera,
+						std::get<NavigationAction>(action));
 				_world.scenePresentation().navigation(std::get<NavigationAction>(action),
 					cameraBeforeAction.x!=_camera.x || cameraBeforeAction.y!=_camera.y || cameraBeforeAction.mapId!=_camera.mapId, bool(entry.combat));
 				advanceEncounterOrdinary(OrdinaryCause::Action);

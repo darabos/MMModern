@@ -4,14 +4,19 @@
 #include "games/xeen/XeenWorld.h"
 
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 
 namespace mmodern {
 
 std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &assets,
 		XeenWorld &world, const XeenCamera &camera,
-		const std::vector<XeenIndoorDrawCommand> &commands) {
+		const std::vector<XeenIndoorDrawCommand> &commands,
+		std::optional<std::uint64_t> ordinaryPhase) {
 	auto scene = std::make_shared<IndoorRenderScene>();
+	world.scenePresentation().publishGpuCamera(camera);
+	scene->camera = world.scenePresentation().gpuCameraState.pose;
+	scene->cameraContinuity = world.scenePresentation().gpuCameraState.continuity;
 	// IndoorDrawList: nearest front wall (32,24)..(200,109), next
 	// (64,40)..(168,93). F/(0.5+B)=168, F/(1.5+B)=104.
 	scene->focalLength = 273.f;
@@ -47,28 +52,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices,
 			bool allowBehindParty = false, bool distort = true) {
 		if (!image->width || !image->height) return;
-		// Keep walls clipped at the party, but let horizontal surfaces and
-		// grounded objects extend toward the virtual eye behind it.
-		constexpr float clipZ = -0.04f;
-		if (allowBehindParty || std::all_of(vertices.begin(), vertices.end(),
-				[&](const auto &v) { return v.z <= clipZ; })) {
-			scene->quads.push_back({std::move(image), vertices, distort});
-			return;
-		}
-		std::vector<IndoorVertex> clipped;
-		auto previous = vertices.back();
-		for (const auto &current : vertices) {
-			if ((previous.z <= clipZ) != (current.z <= clipZ)) {
-				const float t = (clipZ - previous.z) / (current.z - previous.z);
-				const auto lerp = [&](float a, float b) { return a + t * (b - a); };
-				clipped.push_back({lerp(previous.x, current.x), lerp(previous.y, current.y), clipZ,
-					lerp(previous.u, current.u), lerp(previous.v, current.v)});
-			}
-			if (current.z <= clipZ) clipped.push_back(current);
-			previous = current;
-		}
-		for (std::size_t i = 1; i + 1 < clipped.size(); ++i)
-			scene->quads.push_back({image, {clipped[0], clipped[i], clipped[i + 1], clipped[i + 1]}, distort});
+		scene->quads.push_back({std::move(image), vertices, distort, !allowBehindParty && distort});
 	};
 	const auto ground = texture(prefix + ".gnd", 0, resources.ground);
 	const auto &drawing = world.scenePresentation().drawingState();
@@ -90,8 +74,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		if (open && (value == 4 || value == 13)) frame = kind ? 1 : 10;
 		return texture("f" + prefix + (first ? "1.fwl" : "2.fwl"), frame, resources.walls);
 	};
-	for (int dy = -4; dy <= 4; ++dy) for (int dx = -4; dx <= 4; ++dx) {
-		const int x = int(camera.x) + dx, y = int(camera.y) + dy;
+	for (int y = -16; y < 32; ++y) for (int x = -16; x < 32; ++x) {
 		const auto cell = world.sceneCell(camera.mapId, x, y);
 		if (!cell) continue;
 		const float l = x - 0.5f, r = x + 0.5f, s = y - 0.5f, n = y + 0.5f;
@@ -107,15 +90,13 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			const unsigned value = wallAt(*cell->cell, direction);
 			if (!value) continue;
 			float ax = l, ay = n, bx = r, by = n;
-			bool visibleSide = int(camera.y) < n;
 			switch (direction) {
 			case XeenDirection::North: break;
-			case XeenDirection::East: ax = r; ay = n; bx = r; by = s; visibleSide = int(camera.x) < r; break;
-			case XeenDirection::South: ax = r; ay = s; bx = l; by = s; visibleSide = int(camera.y) > s; break;
-			case XeenDirection::West: ax = l; ay = s; bx = l; by = n; visibleSide = int(camera.x) > l; break;
+			case XeenDirection::East: ax = r; ay = n; bx = r; by = s; break;
+			case XeenDirection::South: ax = r; ay = s; bx = l; by = s; break;
+			case XeenDirection::West: ax = l; ay = s; bx = l; by = n; break;
 			}
-			if (!visibleSide) continue;
-			const bool open = dx == 0 && dy == 0 && direction == camera.direction && drawing.openDoor;
+			const bool open = x == camera.x && y == camera.y && direction == camera.direction && drawing.openDoor;
 			auto image = wallTexture(value, open);
 			if (!image->width || !image->height) continue;
 			// A unit-wide quad needs H/W world height for isotropic source texels.
@@ -124,8 +105,55 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 				vertex(bx, by, height, 1, 0), vertex(ax, ay, height, 0, 0)});
 		}
 	}
-	// Use the original visible records and animation frames; GPU visibility never drives combat.
-	for (const auto &command : commands) {
+	// Broader GPU visibility does not activate actors or advance original animation.
+	std::vector<XeenIndoorDrawCommand> renderCommands;
+	const auto resolver = XeenObjectVisualResolver::load(assets);
+	const auto &file = world.objectFile(camera.mapId);
+	for (std::size_t i = 0; i < file.entities.objects.size(); ++i) {
+		const XeenObjectIdentity id{camera.mapId, i};
+		const auto object = world.effectiveObject(id);
+		if (!object.isActive() || object.resourceId >= 255 || world.isObjectDisabled(id)) continue;
+		auto found = std::find_if(commands.begin(), commands.end(), [&](const auto &c) {
+			return c.object() && c.object()->visual.identity == id;
+		});
+		if (found != commands.end()) { renderCommands.push_back(*found); continue; }
+		auto visual = resolver.resolve(file, i, camera.direction, ordinaryPhase, object.tableIndex);
+		if (visual.status != XeenObjectVisualStatus::SupportedStatic &&
+				visual.status != XeenObjectVisualStatus::SupportedAnimated &&
+				visual.status != XeenObjectVisualStatus::UnsupportedAnimation)
+			throw std::runtime_error("Cannot build indoor GPU object: " + visual.diagnostic);
+		if (const auto frame = world.scenePresentation().drawnObjectFrame(id)) visual.frame = *frame;
+		XeenIndoorDrawCommand command;
+		command.sourceX = object.x; command.sourceY = object.y;
+		command.content = XeenIndoorObjectDraw{std::move(visual)};
+		renderCommands.push_back(std::move(command));
+	}
+	std::map<std::pair<int, int>, int> actorLanes;
+	for (const auto &actor : world.sceneActors(camera.mapId)) {
+		if (actor.lifecycle != XeenActorLifecycle::Present || actor.hp <= 0 ||
+				!actor.statistics || !actor.statistics->supportsRendering()) continue;
+		const int lane = actorLanes[{actor.x, actor.y}]++ % 3;
+		const auto found = std::find_if(commands.begin(), commands.end(), [&](const auto &c) {
+			return c.actor() && c.actor()->identity == actor.id;
+		});
+		if (found != commands.end()) {
+			renderCommands.push_back(*found);
+			std::get<XeenIndoorActorDraw>(renderCommands.back().content).selectedSlot = lane;
+			continue;
+		}
+		XeenIndoorDrawCommand command;
+		command.sourceX = actor.x; command.sourceY = actor.y;
+		XeenIndoorActorDraw draw{actor.id, actor.statistics->image()};
+		draw.archive = xeenMonsterArt(camera.mapId, actor.original.resourceId);
+		draw.selectedSlot = lane;
+		if (const auto *animation = drawing.animation(actor.id)) {
+			draw.kind = animation->frame >= 8 ? XeenMonsterSpriteKind::Attack : XeenMonsterSpriteKind::Normal;
+			draw.frame = animation->frame % 8; draw.effectFlags = animation->flags();
+		}
+		command.content = draw;
+		renderCommands.push_back(std::move(command));
+	}
+	for (const auto &command : renderCommands) {
 		std::shared_ptr<const IndoorTexture> image;
 		bool flip = false;
 		float lane = 0, height = wallHeight * 0.8f;
@@ -161,6 +189,11 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 			const float u0 = flip ? 1.f : 0.f, u1 = 1.f - u0;
 			add(image, {{{left, bottom, center.z, u0, 1}, {right, bottom, center.z, u1, 1},
 				{right, top, center.z, u1, 0}, {left, top, center.z, u0, 0}}}, true);
+			auto &quad = scene->quads.back();
+			quad.billboard = true;
+			quad.anchorX = float(command.sourceX); quad.anchorZ = -float(command.sourceY);
+			const auto anchorVertex = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
+			for (auto &v : quad.vertices) { v.x -= anchorVertex.x; v.z -= anchorVertex.z; }
 			continue;
 		} else if (const auto *actor = command.actor()) {
 			if (actor->effectFlags) continue; // Original effect pixels are retained as an overlay.
@@ -168,23 +201,61 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 				XeenAssetSource::attackMonsterResource(actor->image) : XeenAssetSource::normalMonsterResource(actor->image);
 			image = texture(name, actor->frame, actor->archive);
 			lane = float(actor->selectedSlot % 3 - 1) * 0.23f;
-		} else if (const auto *item = command.wallItem()) {
-			image = texture(item->resourceName, item->frame, item->archive);
-			height = wallHeight * 0.35f;
 		} else continue;
 		if (!image->width || !image->height) continue;
 		auto center = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
 		center.x += lane;
-		if (center.z > -0.3f) center.z = -0.4f;
-		if (command.wallItem()) center.z -= 0.46f;
+		center.z -= 0.4f;
 		float width = height * image->width / image->height;
 		if (width > 0.95f) { height *= 0.95f / width; width = 0.95f; }
-		const float bottom = command.wallItem() ? -wallHeight * 0.05f : -eyeHeight;
+		const float bottom = -eyeHeight;
 		const float u0 = flip ? 1.f : 0.f, u1 = 1.f - u0;
 		add(image, {{{center.x - width / 2, bottom, center.z, u0, 1},
 			{center.x + width / 2, bottom, center.z, u1, 1},
 			{center.x + width / 2, bottom + height, center.z, u1, 0},
-			{center.x - width / 2, bottom + height, center.z, u0, 0}}});
+			{center.x - width / 2, bottom + height, center.z, u0, 0}}}, true);
+		auto &quad = scene->quads.back();
+		quad.billboard = true;
+		quad.anchorX = float(command.sourceX); quad.anchorZ = -float(command.sourceY);
+		const auto anchorVertex = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
+		for (auto &v : quad.vertices) { v.x -= anchorVertex.x; v.z -= anchorVertex.z; }
+	}
+	for (std::size_t i = 0; i < file.entities.wallItems.size(); ++i) {
+		const auto item = world.effectiveWallItem({camera.mapId, i});
+		if (!item.isActive() || item.resourceId >= 255) continue;
+		if (item.direction >= 4) throw std::runtime_error("Invalid indoor GPU wall-item direction");
+		const auto digits = std::to_string(int(item.resourceId));
+		const auto name = std::string(3 - digits.size(), '0') + digits + ".pic";
+		const auto count = assets.spriteFrameCount(name, resources.pictures);
+		auto image = texture(name, drawing.wallFrame(count), resources.pictures);
+		if (!image->width || !image->height) continue;
+		float height = wallHeight * 0.35f;
+		float width = height * image->width / image->height;
+		if (width > 0.95f) { height *= 0.95f / width; width = 0.95f; }
+		constexpr float rx[]{1, 0, -1, 0}, ry[]{0, -1, 0, 1};
+		constexpr float fx[]{0, 1, 0, -1}, fy[]{1, 0, -1, 0};
+		const unsigned d = item.direction;
+		const float x = float(int(item.x)) + fx[d] * 0.46f, y = float(int(item.y)) + fy[d] * 0.46f;
+		const float bottom = eyeHeight - wallHeight * 0.05f;
+		add(image, {vertex(x - rx[d] * width / 2, y - ry[d] * width / 2, bottom, 0, 1),
+			vertex(x + rx[d] * width / 2, y + ry[d] * width / 2, bottom, 1, 1),
+			vertex(x + rx[d] * width / 2, y + ry[d] * width / 2, bottom + height, 1, 0),
+			vertex(x - rx[d] * width / 2, y - ry[d] * width / 2, bottom + height, 0, 0)}, true);
+	}
+	// Return fixed world coordinates. Billboard vertices instead remain offsets
+	// in the render camera's basis, around an immutable world anchor.
+	for (auto &quad : scene->quads) {
+		if (!quad.distort || quad.billboard) continue;
+		for (auto &v : quad.vertices) {
+			const float right = v.x, forward = -v.z;
+			switch (XeenDirection(camera.direction)) {
+			case XeenDirection::North: v.x = right; v.z = -forward; break;
+			case XeenDirection::East: v.x = forward; v.z = right; break;
+			case XeenDirection::South: v.x = -right; v.z = forward; break;
+			case XeenDirection::West: v.x = -forward; v.z = -right; break;
+			}
+			v.x += int(camera.x); v.z -= int(camera.y);
+		}
 	}
 	return scene;
 }
