@@ -52,13 +52,7 @@ std::shared_ptr<WorldRenderScene> buildOutdoorRenderScene(XeenAssetSource &asset
 		const float l = x-0.5f, r = x+0.5f, s = y-0.5f, n = y+0.5f;
 		const std::array<WorldVertex,4> floor{{{l,-eyeHeight,-s,u0,1},{r,-eyeHeight,-s,u1,1},
 			{r,-eyeHeight,-n,u1,0},{l,-eyeHeight,-n,u0,0}}};
-		// The original water backdrop fills transparent holes in surface art.
-		scene->quads.push_back({water,floor});
-		if (ground != water) {
-			auto surfaceFloor = floor;
-			for (auto &v : surfaceFloor) v.y += 0.0001f;
-			scene->quads.push_back({ground,surfaceFloor});
-		}
+		scene->quads.push_back({ground,floor});
 		const unsigned terrain = layers ? unsigned(map.geometry.wallTypes[layers->middle]) : 0;
 		if (terrain >= kOutdoorWallNames.size()) throw std::runtime_error("Invalid outdoor GPU terrain");
 		const auto *name = kOutdoorWallNames[terrain];
