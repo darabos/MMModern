@@ -9,7 +9,7 @@ remains null.
 
 ## bgfx rendering
 
-The experimental fork uses bgfx for window presentation and indoor 3D rendering.
+The experimental fork uses bgfx for window presentation and indoor/outdoor 3D rendering.
 SDL2 still owns windowing, input and audio. The selected graphics backends are
 Metal on macOS, Direct3D 11 on Windows and Vulkan on Linux; backend fallback is
 disabled because each build embeds shaders for its selected backend.

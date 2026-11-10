@@ -30,7 +30,7 @@ namespace {
 constexpr Uint8 clearedKeyMake=2;
 constexpr std::uint64_t navigationRepeatDelay = 500000000;
 constexpr std::uint64_t navigationRepeatPeriod = (11000000000ULL + 119) / 120;
-bool modernWorld = false;
+bool modernWorld = true;
 
 // Host window presentation shared by the title and gameplay windows.
 struct PlacementMemory {
