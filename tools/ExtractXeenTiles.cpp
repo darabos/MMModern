@@ -29,7 +29,7 @@ void chunk(Bytes &png, const char *type, const Bytes &data) {
 	word(png, std::uint32_t(crc32(0, png.data() + start, uInt(data.size() + 4))));
 }
 
-void writePng(const fs::path &path, const mmodern::IndoorTexture &image, const Palette &palette) {
+void writePng(const fs::path &path, const mmodern::WorldTexture &image, const Palette &palette) {
 	Bytes rows;
 	for (int y = 0; y < image.height; ++y) {
 		rows.push_back(0);
@@ -56,10 +56,10 @@ void writePng(const fs::path &path, const mmodern::IndoorTexture &image, const P
 	if (!out) throw std::runtime_error("Cannot write PNG: " + path.u8string());
 }
 
-mmodern::IndoorTexture crop(const mmodern::IndoorTexture &source, int x, int y, int width, int height) {
+mmodern::WorldTexture crop(const mmodern::WorldTexture &source, int x, int y, int width, int height) {
 	if (x < 0 || y < 0 || x + width > source.width || y + height > source.height)
 		throw std::runtime_error("Tile crop exceeds original bounds");
-	mmodern::IndoorTexture result;
+	mmodern::WorldTexture result;
 	result.width = width; result.height = height;
 	for (int row = y; row < y + height; ++row) {
 		const auto start = std::size_t(row) * source.width + x;
@@ -69,7 +69,7 @@ mmodern::IndoorTexture crop(const mmodern::IndoorTexture &source, int x, int y, 
 	return result;
 }
 
-mmodern::IndoorTexture mirror(mmodern::IndoorTexture image) {
+mmodern::WorldTexture mirror(mmodern::WorldTexture image) {
 	for (int y = 0; y < image.height; ++y) {
 		const auto start = std::size_t(y) * image.width;
 		std::reverse(image.indices.begin() + start, image.indices.begin() + start + image.width);
@@ -78,7 +78,7 @@ mmodern::IndoorTexture mirror(mmodern::IndoorTexture image) {
 	return image;
 }
 
-void blit(mmodern::IndoorTexture &dest, const mmodern::IndoorTexture &source, int x, int y) {
+void blit(mmodern::WorldTexture &dest, const mmodern::WorldTexture &source, int x, int y) {
 	for (int row = 0; row < source.height; ++row) for (int col = 0; col < source.width; ++col) {
 		const int dx = x + source.originX + col, dy = y + source.originY + row;
 		if (dx < 0 || dy < 0 || dx >= dest.width || dy >= dest.height)
@@ -111,7 +111,7 @@ void extract(const fs::path &game, const fs::path &output, bool portraits) {
 		assets.loadPalette("mm4.pal", archive);
 		const auto palette = assets.snapshot().palette;
 		const auto save = [&](const fs::path &relative, const std::string &resource, const std::string &frame,
-				int depth, int phase, int originX, int originY, const mmodern::IndoorTexture &image) {
+				int depth, int phase, int originX, int originY, const mmodern::WorldTexture &image) {
 			writePng(output / relative, image, palette);
 			manifest << relative.generic_u8string() << ',' << resource << ',' << frame << ',' << depth << ','
 				<< phase << ',' << originX << ',' << originY << ',' << image.width << ',' << image.height << '\n';
@@ -150,7 +150,7 @@ void extract(const fs::path &game, const fs::path &output, bool portraits) {
 				if (frames != (ceiling ? 2u : 1u))
 					throw std::runtime_error("Unexpected background frame count: " + resource);
 				++materials;
-				mmodern::IndoorTexture background;
+				mmodern::WorldTexture background;
 				background.width = 216; background.height = ceiling ? 59 : 73;
 				background.indices.resize(std::size_t(background.width) * background.height);
 				background.alpha.resize(background.indices.size());

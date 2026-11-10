@@ -2,6 +2,7 @@
 #include "games/xeen/XeenIndoorSceneTables.h"
 #include "formats/xeen/XeenAssetSource.h"
 #include "games/xeen/XeenWorld.h"
+#include "games/xeen/XeenWorldRenderScene.h"
 
 #include <algorithm>
 #include <map>
@@ -9,19 +10,13 @@
 
 namespace mmodern {
 
-std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &assets,
+std::shared_ptr<WorldRenderScene> buildIndoorRenderScene(XeenAssetSource &assets,
 		XeenWorld &world, const XeenCamera &camera,
 		const std::vector<XeenIndoorDrawCommand> &commands,
 		std::optional<std::uint64_t> ordinaryPhase) {
-	auto scene = std::make_shared<IndoorRenderScene>();
-	world.scenePresentation().publishGpuCamera(camera);
-	scene->camera = world.scenePresentation().gpuCameraState.pose;
-	scene->cameraContinuity = world.scenePresentation().gpuCameraState.continuity;
+	auto scene = makeWorldRenderScene(world,camera);
 	// IndoorDrawList: nearest front wall (32,24)..(200,109), next
 	// (64,40)..(168,93). F/(0.5+B)=168, F/(1.5+B)=104.
-	scene->focalLength = 273.f;
-	scene->cameraSetback = 1.125f;
-	scene->horizon = 66.5f - 8.f;
 	const auto &map = world.map(camera.mapId);
 	const auto resources = xeenMapResources(camera.mapId);
 	static constexpr const char *prefixes[]{"town", "cave", "towr", "cstl", "dung", "scfi"};
@@ -47,9 +42,9 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		case XeenDirection::West: right = y; forward = -x; break;
 		default: throw std::runtime_error("Invalid indoor GPU camera direction");
 		}
-		return IndoorVertex{right, height - eyeHeight, -forward, u, v};
+		return WorldVertex{right, height - eyeHeight, -forward, u, v};
 	};
-	const auto add = [&](std::shared_ptr<const IndoorTexture> image, std::array<IndoorVertex, 4> vertices,
+	const auto add = [&](std::shared_ptr<const WorldTexture> image, std::array<WorldVertex, 4> vertices,
 			bool allowBehindParty = false, bool distort = true) {
 		if (!image->width || !image->height) return;
 		scene->quads.push_back({std::move(image), vertices, distort, !allowBehindParty && distort});
@@ -154,7 +149,7 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 		renderCommands.push_back(std::move(command));
 	}
 	for (const auto &command : renderCommands) {
-		std::shared_ptr<const IndoorTexture> image;
+		std::shared_ptr<const WorldTexture> image;
 		bool flip = false;
 		float lane = 0, height = wallHeight * 0.8f;
 		if (const auto *object = command.object()) {
@@ -170,30 +165,8 @@ std::shared_ptr<IndoorRenderScene> buildIndoorRenderScene(XeenAssetSource &asset
 				(camera.mapId.side == XeenSide::Clouds ? 113 : 47);
 			const auto &placement = xeen_indoor_scene_tables::kObjectPlacements.front();
 			const auto anchor = special ? 1u : 0u;
-			const float screenBottom = placement.y[anchor] + image->originY + image->height;
-			const float belowHorizon = screenBottom - (scene->horizon + 8.f);
-			// Solve floor contact along the original bottom-corner rays.
-			// Floating artwork stays floating; only submerged bases move.
-			const float distance = belowHorizon > 0 ?
-				std::min(scene->cameraSetback + 0.4f, scene->focalLength * eyeHeight / belowHorizon) :
-				scene->cameraSetback + 0.4f;
-			const float unitsPerPixel = distance / scene->focalLength;
-			auto center = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
-			center.z += scene->cameraSetback - distance;
-			const float left = center.x +
-				(placement.x[anchor] + image->originX - 116.f) * unitsPerPixel;
-			const float top = (scene->horizon + 8.f -
-				(placement.y[anchor] + image->originY)) * unitsPerPixel;
-			const float right = left + image->width * unitsPerPixel;
-			const float bottom = top - image->height * unitsPerPixel;
-			const float u0 = flip ? 1.f : 0.f, u1 = 1.f - u0;
-			add(image, {{{left, bottom, center.z, u0, 1}, {right, bottom, center.z, u1, 1},
-				{right, top, center.z, u1, 0}, {left, top, center.z, u0, 0}}}, true);
-			auto &quad = scene->quads.back();
-			quad.billboard = true;
-			quad.anchorX = float(command.sourceX); quad.anchorZ = -float(command.sourceY);
-			const auto anchorVertex = vertex(float(command.sourceX), float(command.sourceY), 0, 0, 0);
-			for (auto &v : quad.vertices) { v.x -= anchorVertex.x; v.z -= anchorVertex.z; }
+			appendGroundedSprite(*scene,image,float(command.sourceX),float(command.sourceY),
+				eyeHeight,float(placement.x[anchor]),float(placement.y[anchor]),flip);
 			continue;
 		} else if (const auto *actor = command.actor()) {
 			if (actor->effectFlags) continue; // Original effect pixels are retained as an overlay.

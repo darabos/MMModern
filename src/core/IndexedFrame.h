@@ -10,7 +10,7 @@
 namespace mmodern {
 
 class XeenEventFlow;
-struct IndoorRenderScene;
+struct WorldRenderScene;
 struct UiRenderScene;
 struct IndexedFrame {
 	// The retained immutable snapshot is both the uploaded content and its identity.
@@ -24,7 +24,7 @@ struct IndexedFrame {
 	int height = 0;
 	std::vector<std::uint8_t> pixels;
 	std::array<std::uint8_t, kPaletteSize> palette{};
-	std::shared_ptr<const IndoorRenderScene> indoorScene;
+	std::shared_ptr<const WorldRenderScene> worldScene;
 	std::shared_ptr<const UiRenderScene> uiScene;
 	// Original six-bit VGA palette scaling; level is in 0..128.
 	void scaleVgaPalette(unsigned level) {

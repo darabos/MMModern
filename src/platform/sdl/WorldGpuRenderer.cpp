@@ -1,7 +1,7 @@
-#include "platform/sdl/IndoorGpuRenderer.h"
+#include "platform/sdl/WorldGpuRenderer.h"
 #include "platform/sdl/SdlWindowPlacement.h"
-#include "platform/sdl/IndoorCameraSpring.h"
-#include "core/IndoorRenderScene.h"
+#include "platform/sdl/WorldCameraSpring.h"
+#include "core/WorldRenderScene.h"
 #include "core/UiRenderScene.h"
 
 #define SDL_MAIN_HANDLED
@@ -49,10 +49,10 @@ struct MeshVertex {
 	float x, y, z, u, v, anchorX, anchorZ, normalX, normalZ;
 };
 static_assert(sizeof(MeshVertex) == 9 * sizeof(float), "bgfx vertex layout must match MeshVertex");
-static_assert(sizeof(IndoorVertex) == 5 * sizeof(float), "IndoorVertex must have no padding");
+static_assert(sizeof(WorldVertex) == 5 * sizeof(float), "WorldVertex must have no padding");
 
 struct BatchKey {
-	const IndoorTexture *texture;
+	const WorldTexture *texture;
 	int x, z;
 	unsigned flags;
 	bool operator==(const BatchKey &other) const {
@@ -61,7 +61,7 @@ struct BatchKey {
 };
 struct BatchKeyHash {
 	std::size_t operator()(const BatchKey &key) const {
-		auto hash = std::hash<const IndoorTexture *>{}(key.texture);
+		auto hash = std::hash<const WorldTexture *>{}(key.texture);
 		for (const auto value : {unsigned(key.x), unsigned(key.z), key.flags})
 			hash = (hash ^ value) * std::size_t(1099511628211ull);
 		return hash;
@@ -154,7 +154,7 @@ struct GpuDevice {
 	bgfx::TextureHandle overlayTexture = BGFX_INVALID_HANDLE;
 	bgfx::VertexBufferHandle uiVertices = BGFX_INVALID_HANDLE;
 	struct UiDraw {
-		std::shared_ptr<const IndoorTexture> texture;
+		std::shared_ptr<const WorldTexture> texture;
 		bgfx::TextureHandle image = BGFX_INVALID_HANDLE;
 		std::uint32_t first = 0, count = 0;
 	};
@@ -164,7 +164,7 @@ struct GpuDevice {
 	bgfx::FrameBufferHandle worldTarget = BGFX_INVALID_HANDLE, compositionTarget = BGFX_INVALID_HANDLE;
 	int cursorWidth = 0, cursorHeight = 0;
 	IndexedFrame frame;
-	IndoorCameraSpring camera;
+	WorldCameraSpring camera;
 	std::shared_ptr<const std::uint8_t> cameraContinuity;
 	std::chrono::steady_clock::time_point cameraSample = std::chrono::steady_clock::now();
 	bool modernEnabled = false;
@@ -174,11 +174,11 @@ struct GpuDevice {
 		cameraSample = now;
 	}
 	struct Texture {
-		std::weak_ptr<const IndoorTexture> source;
+		std::weak_ptr<const WorldTexture> source;
 		bgfx::TextureHandle handle = BGFX_INVALID_HANDLE;
 		bgfx::TextureHandle mipHandle = BGFX_INVALID_HANDLE;
 	};
-	std::unordered_map<const IndoorTexture *, Texture> textures;
+	std::unordered_map<const WorldTexture *, Texture> textures;
 	std::array<std::uint8_t, 768> palette{};
 	struct Mesh {
 		std::vector<MeshVertex> source;
@@ -190,12 +190,12 @@ struct GpuDevice {
 	};
 	struct Batch {
 		std::shared_ptr<Mesh> mesh;
-		std::shared_ptr<const IndoorTexture> texture;
+		std::shared_ptr<const WorldTexture> texture;
 		bgfx::TextureHandle image = BGFX_INVALID_HANDLE;
 	};
 	std::vector<Batch> batches;
 	std::unordered_multimap<std::size_t, std::weak_ptr<Mesh>> meshCache;
-	std::shared_ptr<const IndoorRenderScene> meshScene;
+	std::shared_ptr<const WorldRenderScene> meshScene;
 
 	GpuDevice(bgfx::PlatformData platform, bgfx::SwapChain chain, int width, int height, bool corrected) :
 		platform(platform), initialChain(chain), frameWidth(width), frameHeight(height), corrected(corrected) {}
@@ -268,7 +268,7 @@ struct GpuDevice {
 			"Cannot create bgfx presentation indices");
 		frameTexture = createTexture(frameWidth, frameHeight);
 		for (auto view : {worldView, compositionView, displayView}) bgfx::setViewMode(view, bgfx::ViewMode::Sequential);
-		bgfx::setViewName(worldView, "Indoor world");
+		bgfx::setViewName(worldView, "World");
 		bgfx::setViewName(compositionView, "Original UI and cursor");
 		bgfx::setViewName(displayView, "Window presentation");
 		std::cerr << "bgfx presenter: " << bgfx::getRendererName(bgfx::getRendererType()) << '\n';
@@ -298,7 +298,7 @@ struct GpuDevice {
 		}
 		const auto result = bgfx::createFrameBuffer(2, attachments, true);
 		if (!bgfx::isValid(result)) for (const auto attachment : attachments) bgfx::destroy(attachment);
-		return require(result, "Cannot create bgfx indoor target");
+		return require(result, "Cannot create bgfx world target");
 	}
 
 	void rectangle(bgfx::ViewId view, bgfx::TextureHandle image, float x, float y, float width, float height,
@@ -349,7 +349,7 @@ struct GpuDevice {
 				const float length = std::max(std::hypot(quad[a].x - quad[b].x, quad[a].z - quad[b].z),
 					std::hypot(quad[c].x - quad[d].x, quad[c].z - quad[d].z));
 				if (!std::isfinite(length) || double(length) * 8 > UINT32_MAX - 1)
-					throw std::runtime_error("Invalid indoor GPU mesh dimensions");
+					throw std::runtime_error("Invalid world GPU mesh dimensions");
 				return std::max(1u, static_cast<unsigned>(std::ceil(length * 8)));
 			};
 			// A fixed world-space grid survives every camera pose. Only the
@@ -359,7 +359,7 @@ struct GpuDevice {
 			const auto vertexCount = base + std::uint64_t(nx + 1) * (ny + 1);
 			if (vertexCount > UINT32_MAX / sizeof(MeshVertex) ||
 					std::uint64_t(nx) * ny > (UINT32_MAX / sizeof(std::uint32_t) - indices.size()) / 6)
-				throw std::runtime_error("Indoor GPU mesh exceeds buffer limits");
+				throw std::runtime_error("World GPU mesh exceeds buffer limits");
 			for (unsigned y = 0; y <= ny; ++y) {
 				const auto left = interpolate(quad[0], quad[3], float(y) / ny);
 				const auto right = interpolate(quad[1], quad[2], float(y) / ny);
@@ -372,15 +372,15 @@ struct GpuDevice {
 			}
 		}
 		mesh->vertices = require(bgfx::createVertexBuffer(bgfx::copy(vertices.data(),
-			std::uint32_t(vertices.size() * sizeof(MeshVertex))), layout), "Cannot create indoor GPU mesh");
+			std::uint32_t(vertices.size() * sizeof(MeshVertex))), layout), "Cannot create world GPU mesh");
 		mesh->indices = require(bgfx::createIndexBuffer(bgfx::copy(indices.data(),
 			std::uint32_t(indices.size() * sizeof(std::uint32_t))), BGFX_BUFFER_INDEX32),
-			"Cannot create indoor GPU mesh indices");
+			"Cannot create world GPU mesh indices");
 		meshCache.emplace(hash, mesh);
 		return mesh;
 	}
 
-	void prepareScene(const std::shared_ptr<const IndoorRenderScene> &scene) {
+	void prepareScene(const std::shared_ptr<const WorldRenderScene> &scene) {
 		if (meshScene == scene) return;
 		if (meshScene && scene && meshScene->quads.size() == scene->quads.size()) {
 			const bool unchanged = std::equal(scene->quads.begin(), scene->quads.end(), meshScene->quads.begin(),
@@ -392,7 +392,7 @@ struct GpuDevice {
 			if (unchanged) { meshScene = scene; return; }
 		}
 		struct SourceBatch {
-			std::shared_ptr<const IndoorTexture> texture;
+			std::shared_ptr<const WorldTexture> texture;
 			std::vector<MeshVertex> vertices;
 			unsigned flags;
 		};
@@ -461,23 +461,23 @@ struct GpuDevice {
 		if (!supplied.isValid() || supplied.width != frameWidth || supplied.height != frameHeight)
 			throw std::invalid_argument("Invalid bgfx framebuffer or changed dimensions");
 		advanceCamera();
-		if (modern && supplied.indoorScene) {
-			const auto &scene = *supplied.indoorScene;
+		if (modern && supplied.worldScene) {
+			const auto &scene = *supplied.worldScene;
 			camera.target(scene.camera, !modernEnabled || cameraContinuity != scene.cameraContinuity);
 			cameraContinuity = scene.cameraContinuity;
 		}
 		modernEnabled = modern;
-		enhanced = modern && allowGameplayLayers && bool(supplied.indoorScene);
+		enhanced = modern && allowGameplayLayers && bool(supplied.worldScene);
 		gpuHud = allowGameplayLayers && bool(supplied.uiScene);
 		if (gpuHud && (supplied.uiScene->basePixels.size()!=supplied.pixels.size() ||
 				supplied.uiScene->referencePixels.size()!=supplied.pixels.size() ||
 				(enhanced && supplied.uiScene->effectCoverage.size()!=supplied.pixels.size())))
 			throw std::invalid_argument("Invalid GPU HUD framebuffer layers");
 		if (enhanced && (frameWidth != 320 || frameHeight != 200 ||
-				supplied.indoorScene->originalPixels.size() != supplied.pixels.size() ||
-				supplied.indoorScene->interfaceCoverage.size() != supplied.pixels.size()))
-			throw std::invalid_argument("Invalid indoor scene overlay coverage");
-		if (enhanced) prepareScene(supplied.indoorScene);
+				supplied.worldScene->originalPixels.size() != supplied.pixels.size() ||
+				supplied.worldScene->interfaceCoverage.size() != supplied.pixels.size()))
+			throw std::invalid_argument("Invalid world scene overlay coverage");
+		if (enhanced) prepareScene(supplied.worldScene);
 		if (gpuHud) prepareUi(supplied.uiScene);
 		if (enhanced || gpuHud) {
 			for (auto it = textures.begin(); it != textures.end();) {
@@ -499,7 +499,7 @@ struct GpuDevice {
 			for (unsigned c = 0; c < 3; ++c) rgba[i * 4 + c] = supplied.palette[p + c];
 			bool transparent = false;
 			if (enhanced) {
-				const auto &scene = *supplied.indoorScene;
+				const auto &scene = *supplied.worldScene;
 				const auto x = i % frameWidth, y = i / frameWidth;
 				transparent = x >= 8 && x < 224 && y >= 8 && y < 140 &&
 					(gpuHud ? !supplied.uiScene->effectCoverage[i] :
@@ -522,17 +522,17 @@ struct GpuDevice {
 		frame = supplied;
 	}
 
-	bgfx::TextureHandle uploadTexture(const std::shared_ptr<const IndoorTexture> &source, bool mipmaps = false) {
+	bgfx::TextureHandle uploadTexture(const std::shared_ptr<const WorldTexture> &source, bool mipmaps = false) {
 		const auto found = textures.find(source.get());
 		if (found != textures.end()) {
 			const auto image = mipmaps ? found->second.mipHandle : found->second.handle;
 			if (bgfx::isValid(image)) return image;
 		}
 		if (source->width <= 0 || source->height <= 0)
-			throw std::invalid_argument("Invalid indoor texture dimensions");
+			throw std::invalid_argument("Invalid world texture dimensions");
 		const auto count = std::size_t(source->width) * source->height;
 		if (source->indices.size() != count || source->alpha.size() != count)
-			throw std::invalid_argument("Invalid indoor texture payload");
+			throw std::invalid_argument("Invalid world texture payload");
 		std::vector<std::uint8_t> rgba(count * 4);
 		for (std::size_t i = 0; i < count; ++i) {
 			const auto p = std::size_t(source->indices[i]) * 3;
@@ -597,7 +597,7 @@ struct GpuDevice {
 			bgfx::setViewFrameBuffer(worldView, worldTarget);
 			bgfx::setViewRect(worldView, 0, 0, 216 * 3, 132 * 3);
 			bgfx::setViewClear(worldView, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.f, 0);
-			const auto &scene = *frame.indoorScene;
+			const auto &scene = *frame.worldScene;
 			constexpr float nearPlane = 0.04f;
 			const float farPlane = scene.cameraSetback + 12.f;
 			const auto pose = camera.pose();
@@ -702,7 +702,7 @@ struct GpuDevice {
 	}
 };
 
-struct IndoorGpuRenderer::Impl {
+struct WorldGpuRenderer::Impl {
 	struct HostState {
 		int x = 0, y = 0, width = 0, height = 0, outputWidth = 0, outputHeight = 0;
 		bool visible = false, cursorEnabled = false;
@@ -923,16 +923,16 @@ struct IndoorGpuRenderer::Impl {
 	}
 };
 
-IndoorGpuRenderer::IndoorGpuRenderer(SDL_Window *window, int width, int height, bool corrected) :
+WorldGpuRenderer::WorldGpuRenderer(SDL_Window *window, int width, int height, bool corrected) :
 	_impl(std::make_unique<Impl>(window,width,height,corrected)) {}
-IndoorGpuRenderer::~IndoorGpuRenderer() = default;
-void IndoorGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowGameplayLayers) {
+WorldGpuRenderer::~WorldGpuRenderer() = default;
+void WorldGpuRenderer::upload(const IndexedFrame &frame, bool modern, bool allowGameplayLayers) {
 	if (!frame.isValid() || frame.width!=_impl->frameWidth || frame.height!=_impl->frameHeight)
 		throw std::invalid_argument("Invalid render-thread framebuffer");
 	// Stage on the producer: an unpresented handoff must not leak into redraws.
 	_impl->pendingUpload = Impl::Upload{frame,modern,allowGameplayLayers};
 }
-void IndoorGpuRenderer::present(bool cursorEnabled) {
+void WorldGpuRenderer::present(bool cursorEnabled) {
 	auto request = std::make_shared<Impl::Request>();
 	_impl->cursorEnabled = cursorEnabled;
 	request->host = _impl->hostState(cursorEnabled);
@@ -941,7 +941,7 @@ void IndoorGpuRenderer::present(bool cursorEnabled) {
 	request->present = true;
 	_impl->submit(request);
 }
-void IndoorGpuRenderer::refreshWindow() {
+void WorldGpuRenderer::refreshWindow() {
 	const auto host = _impl->hostState(_impl->cursorEnabled);
 	{
 		std::lock_guard<std::mutex> lock(_impl->mutex);
@@ -950,22 +950,22 @@ void IndoorGpuRenderer::refreshWindow() {
 	}
 	_impl->wake.notify_one();
 }
-void IndoorGpuRenderer::mouseMoved() {
+void WorldGpuRenderer::mouseMoved() {
 #if !defined(__APPLE__) && !defined(_WIN32)
 	if (!_impl->globalCursor) refreshWindow();
 #endif
 }
-std::uint64_t IndoorGpuRenderer::presentedFrames() const {
+std::uint64_t WorldGpuRenderer::presentedFrames() const {
 	std::lock_guard<std::mutex> lock(_impl->mutex);
 	if (_impl->failure) std::rethrow_exception(_impl->failure);
 	return _impl->frames;
 }
-std::pair<int,int> IndoorGpuRenderer::outputSize() const {
+std::pair<int,int> WorldGpuRenderer::outputSize() const {
 	int width = 0, height = 0;
 	SDL_GetWindowSizeInPixels(_impl->window,&width,&height);
 	return {width,height};
 }
-void IndoorGpuRenderer::cursor(const IndexedFrame &frame) {
+void WorldGpuRenderer::cursor(const IndexedFrame &frame) {
 	auto request = std::make_shared<Impl::Request>();
 	request->cursor = frame;
 	_impl->submit(request);

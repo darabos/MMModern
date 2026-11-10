@@ -1,14 +1,14 @@
-#ifndef MMODERN_PLATFORM_SDL_INDOOR_CAMERA_SPRING_H
-#define MMODERN_PLATFORM_SDL_INDOOR_CAMERA_SPRING_H
+#ifndef MMODERN_PLATFORM_SDL_WORLD_CAMERA_SPRING_H
+#define MMODERN_PLATFORM_SDL_WORLD_CAMERA_SPRING_H
 
-#include "core/IndoorRenderScene.h"
+#include "core/WorldRenderScene.h"
 #include <cmath>
 
 namespace mmodern {
 
-class IndoorCameraSpring {
+class WorldCameraSpring {
 public:
-	void target(const IndoorCameraPose &pose, bool snap) {
+	void target(const WorldCameraPose &pose, bool snap) {
 		_target = pose;
 		if (snap || !_initialized) {
 			_current = pose;
@@ -22,7 +22,7 @@ public:
 		advanceAxis(_current.y, _velocity.y, _target.y, seconds, 0.0001);
 		advanceAxis(_current.turns, _velocity.turns, _target.turns, seconds, 0.00001);
 	}
-	const IndoorCameraPose &pose() const { return _current; }
+	const WorldCameraPose &pose() const { return _current; }
 	bool moving() const {
 		return _initialized && (_current.x != _target.x || _current.y != _target.y ||
 			_current.turns != _target.turns || _velocity.x != 0 ||
@@ -42,7 +42,7 @@ private:
 			velocity = 0;
 		}
 	}
-	IndoorCameraPose _current, _target, _velocity;
+	WorldCameraPose _current, _target, _velocity;
 	bool _initialized = false;
 };
 

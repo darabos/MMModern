@@ -32,7 +32,8 @@ public:
 		std::optional<XeenMonsterAppearance> actorFrame = std::nullopt) const;
 	// Execute the single, already ordered outdoor command stream.
 	void drawOutdoorCommands(XeenAssetSource &assets,
-		const std::vector<XeenOutdoorDrawCommand> &commands,XeenSceneArchive archive=XeenSceneArchive::Current) const;
+		const std::vector<XeenOutdoorDrawCommand> &commands,XeenSceneArchive archive=XeenSceneArchive::Current,
+		std::vector<std::uint8_t> *effectCoverage=nullptr) const;
 	// Execute the single, already ordered indoor geometry/object command stream.
 	void drawIndoorCommands(XeenAssetSource &assets,
 		const std::vector<XeenIndoorDrawCommand> &commands,XeenSceneArchive archive=XeenSceneArchive::Current,

@@ -6,7 +6,7 @@
 #include "core/NavigationAction.h"
 #include "core/PresentationClock.h"
 #include "core/IndexedFrame.h"
-#include "core/IndoorRenderScene.h"
+#include "core/WorldRenderScene.h"
 #include "games/xeen/XeenNavigation.h"
 #include "formats/xeen/XeenMonsterAppearance.h"
 #include <map>
@@ -88,9 +88,9 @@ struct XeenObjectFrames {
 class XeenScenePresentation {
 public:
 	struct GpuCameraState {
-		IndoorCameraPose pose;
+		WorldCameraPose pose;
 		std::shared_ptr<const std::uint8_t> continuity;
-		static IndoorCameraPose cameraPose(const XeenCamera &camera) {
+		static WorldCameraPose cameraPose(const XeenCamera &camera) {
 			return {std::uint32_t(camera.mapId.number) | (std::uint32_t(camera.mapId.side) << 16),
 				double(int(camera.x)), double(int(camera.y)), double(static_cast<unsigned>(XeenDirection(camera.direction)))};
 		}

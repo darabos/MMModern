@@ -83,7 +83,7 @@ std::vector<std::uint8_t> readBytes(Common::SeekableReadStream &stream,
 
 class StreamSpriteResource final : public SpriteResource {
 public:
-	std::shared_ptr<const IndoorTexture> texture(std::size_t frame) const {
+	std::shared_ptr<const WorldTexture> texture(std::size_t frame) const {
 		if (frame >= size()) throw std::runtime_error("Missing indoor texture frame");
 		int left = 65535, top = 65535, right = 0, bottom = 0;
 		const auto word = [&](std::size_t p) {
@@ -98,7 +98,7 @@ public:
 			left = std::min(left, x); top = std::min(top, y);
 			right = std::max(right, x + w); bottom = std::max(bottom, y + h);
 		}
-		auto result = std::make_shared<IndoorTexture>();
+		auto result = std::make_shared<WorldTexture>();
 		if (right <= left || bottom <= top) return result;
 		result->width = right - left; result->height = bottom - top;
 		result->originX = left; result->originY = top;
@@ -327,7 +327,7 @@ struct ScummVmXeenBridge::Impl {
 		std::unique_ptr<StreamSpriteResource> decoded;
 	};
 	std::unordered_map<std::string, CachedSprite> sprites;
-	std::unordered_map<std::string, std::shared_ptr<const IndoorTexture>> indoorTextures;
+	std::unordered_map<std::string, std::shared_ptr<const WorldTexture>> indoorTextures;
 	std::vector<std::uint8_t> interfaceCoverage;
 	std::size_t spriteLoads = 0;
 	std::unordered_map<std::string,std::vector<std::uint8_t>> admittedSprites;
@@ -494,7 +494,7 @@ void ScummVmXeenBridge::discardSpriteCache() {
 	_impl->indoorTextures.clear();
 }
 
-std::shared_ptr<const IndoorTexture> ScummVmXeenBridge::spriteTexture(
+std::shared_ptr<const WorldTexture> ScummVmXeenBridge::spriteTexture(
 		const std::string &name, std::size_t frame, XeenSceneArchive archive) {
 	const auto key = std::to_string(int(archive)) + ":" + name + ":" + std::to_string(frame);
 	const auto found = _impl->indoorTextures.find(key);

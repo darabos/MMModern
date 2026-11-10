@@ -1,13 +1,13 @@
 #ifndef MMODERN_CORE_UI_RENDER_SCENE_H
 #define MMODERN_CORE_UI_RENDER_SCENE_H
 
-#include "core/IndoorRenderScene.h"
+#include "core/WorldRenderScene.h"
 #include <string>
 
 namespace mmodern {
 
 struct UiQuad {
-	std::shared_ptr<const IndoorTexture> texture;
+	std::shared_ptr<const WorldTexture> texture;
 	int x = 0, y = 0;
 	int left = 0, top = 0, right = 320, bottom = 200;
 	std::string resource;

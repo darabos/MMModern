@@ -14,7 +14,7 @@ struct XeenAssetSource::Impl {
 	ScummVmXeenBridge bridge;
  GameInstallation installation;
  std::unique_ptr<XeenDosText> text;
- std::map<XeenSceneArchive,std::shared_ptr<const IndoorTexture>> backgrounds;
+ std::map<XeenSceneArchive,std::shared_ptr<const WorldTexture>> backgrounds;
 
 	explicit Impl(const GameInstallation &source) : bridge(source),installation(source) {}
 
@@ -35,14 +35,14 @@ XeenAssetSource::XeenAssetSource(const GameInstallation &installation,
 }
 
 XeenAssetSource::~XeenAssetSource() = default;
-std::shared_ptr<const IndoorTexture> XeenAssetSource::spriteTexture(
+std::shared_ptr<const WorldTexture> XeenAssetSource::spriteTexture(
 		const std::string &name, std::size_t frame, XeenSceneArchive archive) {
 	return _impl->bridge.spriteTexture(name, frame, archive);
 }
-std::shared_ptr<const IndoorTexture> XeenAssetSource::backgroundTexture(XeenSceneArchive archive) {
+std::shared_ptr<const WorldTexture> XeenAssetSource::backgroundTexture(XeenSceneArchive archive) {
 	const auto found = _impl->backgrounds.find(archive);
 	if (found != _impl->backgrounds.end()) return found->second;
-	auto texture = std::make_shared<IndoorTexture>();
+	auto texture = std::make_shared<WorldTexture>();
 	texture->width = 320; texture->height = 200;
 	texture->indices = readArchiveResource("back.raw", archive);
 	if (texture->indices.size() != 320 * 200) throw std::runtime_error("Invalid HUD background dimensions");

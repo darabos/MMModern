@@ -1,5 +1,5 @@
 #include "platform/sdl/SdlWindow.h"
-#include "platform/sdl/IndoorGpuRenderer.h"
+#include "platform/sdl/WorldGpuRenderer.h"
 #include "core/DiagnosticNotice.h"
 #include "platform/sdl/SdlAudioDevice.h"
 #include "platform/sdl/SdlWindowPlacement.h"
@@ -30,7 +30,7 @@ namespace {
 constexpr Uint8 clearedKeyMake=2;
 constexpr std::uint64_t navigationRepeatDelay = 500000000;
 constexpr std::uint64_t navigationRepeatPeriod = (11000000000ULL + 119) / 120;
-bool modernIndoor = false;
+bool modernWorld = false;
 
 // Host window presentation shared by the title and gameplay windows.
 struct PlacementMemory {
@@ -59,13 +59,13 @@ void recordWindowedSize(SDL_Window *window) {
 	}
 }
 
-bool uploadFrame(IndoorGpuRenderer &gpu, const IndexedFrame &frame,
+bool uploadFrame(WorldGpuRenderer &gpu, const IndexedFrame &frame,
 		int expectedWidth, int expectedHeight, bool allowModern = true) {
 	if (!frame.isValid() || frame.width != expectedWidth || frame.height != expectedHeight) {
 		std::cerr << "Invalid indexed framebuffer or changed dimensions.\n";
 		return false;
 	}
-	gpu.upload(frame, modernIndoor, allowModern);
+	gpu.upload(frame, modernWorld, allowModern);
 	return true;
 }
 
@@ -294,7 +294,7 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
 		~PlacementRecord() { try { recordWindowedSize(window); savePlacement(); } catch (...) {} }
 	} placementRecord{window};
 	const bool corrected = placement.placement.aspect == PictureAspect::FourThree;
-	IndoorGpuRenderer gpu(window, initialFrame.width, initialFrame.height, corrected);
+	WorldGpuRenderer gpu(window, initialFrame.width, initialFrame.height, corrected);
 	SDL_SetWindowMinimumSize(window, initialFrame.width, corrected ? initialFrame.width * 3 / 4 : initialFrame.height);
 
     if(handler.cursorImage) {
@@ -512,17 +512,17 @@ bool showLoop(const IndexedFrame &suppliedInitial, const std::string &title,
         }
 		if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_F11) {
 			if (!event.key.repeat) {
-				modernIndoor = !modernIndoor;
+				modernWorld = !modernWorld;
 				try {
 					if (!uploadFrame(gpu, displayContent, initialFrame.width,
 							initialFrame.height, allowModernDisplay))
-						throw std::runtime_error("Cannot upload switched indoor renderer");
+						throw std::runtime_error("Cannot upload switched world renderer");
 					present();
-					std::cerr << "Indoor renderer: " << (modernIndoor ? "experimental GPU (indoors only)" : "original") << '\n';
+					std::cerr << "World renderer: " << (modernWorld ? "experimental GPU" : "original") << '\n';
 				} catch (const std::exception &error) {
-					modernIndoor = false;
-					std::cerr << "Indoor GPU renderer failed: " << error.what() << '\n';
-					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Indoor GPU renderer", error.what(), window);
+					modernWorld = false;
+					std::cerr << "World GPU renderer failed: " << error.what() << '\n';
+					SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "World GPU renderer", error.what(), window);
 					if (!uploadFrame(gpu, displayContent, initialFrame.width,
 							initialFrame.height, allowModernDisplay))
 						throw std::runtime_error("Cannot restore original renderer");

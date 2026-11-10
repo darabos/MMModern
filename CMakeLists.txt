@@ -160,6 +160,8 @@ add_library(mmodern_xeen STATIC
 	src/games/xeen/XeenOutdoorScene.cpp
 	src/games/xeen/XeenIndoorScene.cpp
 	src/games/xeen/XeenIndoorRenderScene.cpp
+	src/games/xeen/XeenOutdoorRenderScene.cpp
+	src/games/xeen/XeenWorldRenderScene.cpp
 	src/games/xeen/XeenMovement.cpp
 	src/games/xeen/XeenWorld.cpp
 	src/games/xeen/XeenVertigoWorld.cpp
@@ -175,7 +177,7 @@ add_library(mmodern_platform_sdl STATIC
 	src/platform/sdl/SdlAudioDevice.cpp
 	src/platform/sdl/SdlAudioStream.cpp
 	src/platform/sdl/SdlWindow.cpp
-	src/platform/sdl/IndoorGpuRenderer.cpp
+	src/platform/sdl/WorldGpuRenderer.cpp
 	src/platform/sdl/SdlWindowPlacement.cpp
 )
 target_link_libraries(mmodern_platform_sdl PUBLIC mmodern_core PRIVATE SDL2::SDL2 mmodern_platform_libs mmodern_platform_files)
